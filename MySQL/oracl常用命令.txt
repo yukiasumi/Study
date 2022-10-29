@@ -1,0 +1,213 @@
+--创建表空间，登录sys
+create tablespace ZL_ASSERT
+datafile 'E:\Data\DB\ZL_ASSERT.dbf'
+size 100M
+autoextend on next 50M maxsize unlimited;
+
+--创建用户并关联表空间
+create user zl identified by zl123456zl default tablespace ZL_ASSERT;
+--授权用户
+grant connect,resource,dba to zl;
+grant create any table to zl;
+--grant execute on dbms_lock to zl;
+--grant execute on ctxsys.ctx_ddl to zl;
+
+--删除用户，需要重新导入数据时先把用户删除
+--删除用户需要断开用户的所有连接
+Drop user zl cascade;
+
+--删除表空间，一般不删除表空间
+Drop tablespace tabaspacename including contents and datafiles;
+
+常见Oracle导入、导出语句
+以用户模式导出：
+expuserid=zl/zl123456zl@XE file=D:\zl.dmp owner=zl direct=true feedback=10000 buffer=100000 statistics=none Log=D:\zl.log
+导出表：
+expuserid=zl/zl123456zl@XE file=D:\zl_table.dmp tables=(table1,table2) direct=true feedback=10000 buffer=100000 statistics=none log=F:\zl_table.log
+导入表：
+imp userid=zl/zl123456zl@XE_189 file=D:\zl.dmp tables=(table1,table2) feedback=10000 buffer=100000 ignore=y statistics=none log=F:\zl.log
+
+--修改游标与进程数，需重启oracl服务生效
+alter system set open_cursors=1000 scope=both;
+alter system set processes=500 scope=spfile;
+--游标与进程数修改后需要重启oracl服务
+--打开命令行窗口，输入下面命令
+sqlplus sys/zl123456zl as sysdba;
+shutdown abor;
+--shutdown immediate;
+startup;
+--startup mount;
+--lsnrctl start
+
+--查看进程、游标数据库允许的最大连接数
+select value from v$parameter where name = 'processes';
+select value from v$parameter where name = 'open_cursors';
+  
+
+--查看当前打开的游标数目
+select count(*) from v$open_cursor;
+--查看数据库当前会话的连接数
+select count(*) from v$session;
+--select username,sid,serial# from v$session;
+--查询数据库当前进程的连接数
+select count(*) from v$process;
+--删除会话
+alter system kill session 'sid,serail';
+--通过查看session的状态来确定该session是否被kill
+select saddr,sid,serial#,paddr,username,status from v$session where username is not null;
+
+--查看数据库的并发连接数
+select count(*) from v$session where status='ACTIVE';
+--查看当前数据库建立的会话情况：
+select sid,serial#,username,program,machine,status from v$session;
+
+--查看被锁的用户,LOCK_DATE为空说明没有锁定，非空为锁定
+select * from dba_users where lock_date is not null;
+--解除锁定
+alter user username account unlock;
+
+
+--查看当前有哪些用户正在使用数据：
+select osuser,a.username,cpu_time/executions/1000000||'s',sql_fulltext,machine
+from v$session a,v$sqlarea b
+where a.sql_address = b.address
+order by cpu_time/executions desc;
+--备注：UNIX 1个用户session对应一个操作系统process，而Windows体现在线程。
+
+--select table_name,tablespace_name from user_tables;
+
+
+--sqlplus常用命令
+--通过sqlplus修改sys密码，连接sys可直接修改其他用户密码
+sqlplus/nolog;
+connect/as sysdba;
+alter user sys identified by zl123456zl;
+
+--登录普通用户
+sqlplus username/password
+--sys和system需要以sysdba登录
+sqlplus username/password as sysdba
+--sqlplus username/password@net_service_name 如: sqlplus scott/tiger@orcl
+--连接远程用户
+sqlplus username/pwd@IP:1521/XE
+
+
+--delete删除数据，不释放表空间
+delete from tablename;
+--truncate删除数据，释放表空间
+truncate table tablename;
+--以上两个只能删除数据，不能删除表结构
+--drop可以删除表结构，也会释放表空间
+drop table tablename cascade constraints;
+
+
+
+
+
+
+
+
+
+
+--导入、导出语句
+
+--导出
+
+--1、完全导出
+exp userid=username/pwd@XE rows=y indexes=y compress=n buffer=10000 feedback=100000 full=y file=F:\zl.dmp log=F:\zl.log
+--FULL 指定是否以全部数据库方式导出，只有授权用户才可使用此参数
+
+--2、用户模式导出(常用)
+exp userid=username/pwd@XE file=F:\zl.dmp owner=username direct=true feedback=10000 buffer=100000 statistics=none Log=F:\zl.log
+--exp userid=system/pwd@XE file=F:\zl.dmp owner=(username1,username2) direct=true feedback=10000 buffer=100000 statistics=none Log=F:\zl.log
+
+--3、表模式导出
+exp userid=username/pwd@XE file=F:\zl.dmp tables=(tablename) direct=true feedback=10000 buffer=100000 statistics=none log=F:\zl.log
+
+--将数据库中的表table1中的字段filed1以"00"打头的数据导出
+--exp userid=username/pwd@XE file=F:\username.dmp tables=(tablename) query=\" where filed1 like  '00%'\" log=F:\zl.log
+
+
+--导入
+
+--1、完全导入
+imp userid=username/psw@XE file=F:\zl.dmp full=y log=F:\zl.log
+--2、用户模式导入（常用）
+imp userid=username/pwd@XE file=F:\zl.dmp fromuser=username touser=username ignore=y statistics=none feedback=10000 buffer=100000 log=F:\zl.log
+--3、表模式导入
+imp userid=username/pwd@XE file=F:\zl.dmp tables=(tablename1,tablename2) feedback=10000 buffer=100000 ignore=y statistics=none log=F:\zl.log
+
+
+
+--导入存储过程.以下内容放到bat文件内执行
+@echo ***************************************
+@echo 导入存储过程 请把要导入的存储过程写到[procedures.sql]文件
+@echo ***************************************
+@echo off
+set p_user="zl"
+set p_password="zl123456zl"
+set p_sid="XE"
+sqlplus %p_user%/%p_password%@%p_sid% @"%~dp0procedures.sql"
+@echo ***************************************
+@echo 导入存储过程完了
+@echo ***************************************
+pause
+
+
+
+
+常见问题
+一
+oracle桌面版安装，遇到报错
+1、双击Setup.exe，启动安装程序，在选在路径那里不要点下一步，否则会报“... ...Reg_XE. 该文件似乎不存在。”的错误！
+2、进入以下目录"C:\Users\<your user name>\AppData\Local\Temp"找到类似{60712028-B7B0-4EC3-9C28-663111EC954A}目录，
+找到文件“OracleMTSRecoveryService.reg”，并复制一份重命名为“KEY_XE.reg”。
+
+
+二
+查看计算机信息
+systeminfo
+winver
+
+三
+netstat -ano，列出所有端口的情况
+netstat -aon|findstr "1521"查看被占用端口对应的PID
+tasklist|findstr "2720"查看是哪个进程或者程序占用了2720端口
+
+四
+如果一台机器上的Winsock协议配置有问题的话将会导致网络连接等问题，
+就需要用netsh winsock reset命令来重置Winsock目录借以恢复网络，
+需要重新启动
+netsh winsock reset
+
+五
+导入数据如果报以下错误
+IMP-00017: 由于 ORACLE 错误 2304, 以下语句失败:
+ "CREATE TYPE "STR_LIST" TIMESTAMP '2016-02-19:23:26:48' OID '0542AC87300F4FB"
+ "1AE1479A84097488A'    IS TABLE OF VARCHAR2 (4000)"
+ ""
+IMP-00003: 遇到 ORACLE 错误 2304
+ORA-02304: 无效的对象标识符文字
+
+数据库连上用户，打开SQL window 执行 
+CREATE OR REPLACE TYPE "STR_LIST"  IS TABLE OF VARCHAR2 (4000)
+点击菜单Tools-Compile Invalid Object 点击Excute
+再次点击菜单Tools-Compile Invalid Object，检查无误即可
+
+
+查询某个单位未上传照片资产卡片：select * from bs_ast_card where orgid='单位ID' and objectid not in(select bsid from core_fujtp where orgid='单位ID')
+
+
+oracle数据库中ORA-28000: the account is locked问题,这个用户已经被锁住了，得解锁
+用system或sys用户登陆，然后
+ALTER USER username ACCOUNT UNLOCK;
+
+卡片表Bs_ast_card；人员表：core_user  bd_dept部门表；单位信息表：bd_org
+
+SELECT * FROM CORE_VERSION ORDER BY CREATETIME DESC;
+记录了第一次导入的版本与之后升级了哪些版本
+
+查询默认的密码保存时间
+SELECT * FROM dba_profiles WHERE profile='DEFAULT' AND resource_name='PASSWORD_LIFE_TIME';
+将密码有效期由默认的180天修改成“无限制” 
+ALTER PROFILE DEFAULT LIMIT PASSWORD_LIFE_TIME UNLIMITED;

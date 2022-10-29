@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<body>
+<script language="JavaScript">
+
+    var result = confirm("老板，你真的不加个钟吗？");
+    if (result) {
+        console.log("老板点了确定，表示要加钟");
+    } else {
+        console.log("老板点了确定，表示不加钟");
+    }
+
+    // 创建对象
+    var obj01 = new Object();
+
+    // 给对象设置属性和属性值
+    obj01.stuName = "tom";
+    obj01.stuAge = 20;
+    obj01.stuSubject = "java";
+
+    // 在控制台输出对象
+    console.log(obj01);
+
+
+
+    // 直接打印this
+    console.log(this);
+
+
+
+    // 函数中的this
+    // 1.声明函数
+    function getName() {
+        console.log(this.name);
+    }
+
+    // 2.创建对象
+    var obj01 = {
+        "name":"tom",
+        "getName":getName
+    };
+    var obj02 = {
+        "name":"jerry",
+        "getName":getName
+    };
+
+    // 3.调用函数
+    obj01.getName();
+    obj02.getName();
+    var obj02 = {
+        "soldierName":"john",
+        "soldierAge":35,
+        "soldierWeapon":"gun",
+        "soldierShoot":function(){
+            console.log(this.soldierName + " is using " + this.soldierWeapon);
+        }
+    };
+
+    // 在控制台输出对象
+    console.log(obj02);
+    // 调用函数
+    obj02.soldierShoot();
+
+
+
+
+    // 1.创建数组对象
+    var arr01 = new Array();
+
+    // 2.压入数据
+    arr01.push("apple");
+    arr01.push("orange");
+    arr01.push("banana");
+    arr01.push("grape");
+    console.log(arr01);
+
+    // 3.遍历数组
+    for (var i = 0; i < arr01.length; i++) {
+        console.log(arr01[i]);
+    }
+
+    // 4.数组元素反序
+    arr01.reverse();
+    for (var i = 0; i < arr01.length; i++) {
+        console.log(arr01[i]);
+    }
+
+    // 5.数组元素拼接成字符串
+    var arrStr = arr01.join(",");
+    console.log(arrStr);
+
+    // 6.字符串拆分成数组
+    var arr02 = arrStr.split(",");
+    for (var i = 0; i < arr02.length; i++) {
+        console.log(arr02[i]);
+    }
+
+    // 7.弹出数组中最后一个元素
+    var ele = arr01.pop();
+    console.log(ele);
+</script>
+</body>
+</html>

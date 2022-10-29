@@ -1,0 +1,5 @@
+
+^
+java:S2259%"HA "NullPointerException" could be thrown; "connection" is nullable here.(…¯Ÿ¥
+P
+java:S1118":Add a private constructor to hide the implicit public one.(∏¶Ò≈

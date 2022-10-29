@@ -1,0 +1,21 @@
+#!/bin/bash
+source /home/oracle/.bash_profile
+mkdir /oradata/{{DOWNSID}}/
+mkdir -p /oracle/admin/{{downsid}}/adump
+cp /tmp/orapw* $ORACLE_HOME/dbs/orapw{{downsid}}
+cat ADGl >> $ORACLE_HOME/network/admin/listener.ora
+cat ADGt >> $ORACLE_HOME/network/admin/tnsnames.ora
+sed 's/{{sourcesid}}/{{downsid}}/g' /tmp/init > /tmp/init1
+sed 's/{{SOURCESID}}/{{DOWNSID}}/g' /tmp/init1 > /tmp/init2
+sed "s/db_name='{{downsid}}'/db_name='{{sourcesid}}'/g" /tmp/init2 > /tmp/init3
+sqlplus / as sysdba @ ADG0b.sql
+lsnrctl start
+rman target sys/123456@{{sourcesid}} auxiliary sys/123456@{{downsid}} <<EOF
+run
+{
+duplicate target database for standby from active database nofilenamecheck;
+}
+EOF
+sqlplus / as sysdba @ ADG1b.sql
+
+

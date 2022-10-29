@@ -1,0 +1,19 @@
+---
+- hosts: localhost
+  remote_user: root
+
+  tasks:
+   - name: get dbztasks
+     shell: chdir=/root ./curl.sh 4
+     register: dbztasks
+   - name: alter docker config
+     copy: content='{\"log-driver\":\"json-file\",\"log-opts\":{\"max-size\":\"500m\",\"max-file\":\"100\"}}' dest=/root/test/json.txt
+   - name: restart docker 
+     shell: systemctl daemon-reload && systemctl restart docker
+   - name: stop container
+     command: docker stop containerId
+   - name: remove container
+     command: docker rm containerId
+   - name: rebuild container
+     command: docker run
+

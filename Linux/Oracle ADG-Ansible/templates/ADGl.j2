@@ -1,0 +1,15 @@
+SID_LIST_LISTENER=
+  (SID_LIST=
+    (SID_DESC =
+      (GLOBAL_DBNAME= {{downsid}})
+      (ORACLE_HOME =/oracle/product/19.0.0/dbhome_1)
+      (SID_NAME = {{downsid}})
+    )
+  )
+	
+LISTENER=
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL= TCP)(HOST = 192.168.10.132)(PORT = 1521))
+  )
+  
+ADR_BASE_LISTENER =/oracle

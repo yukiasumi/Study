@@ -1,0 +1,55 @@
+- hosts: adg
+  remote_user: root
+  gather_facts: False
+  vars_files: vars.yml
+
+  tasks:
+    - name: copy files
+      template: src={{item}}.j2 dest=/tmp/{{item}}
+      with_items:
+        - ADG0a.sql
+        - ADG0b.sql
+        - ADG1a.sql
+        - ADG1b.sql
+        - ADG2a.sql
+        - ADG2b.sql
+        - ADG3a.sql
+        - ADG3b.sql
+        - ADGl
+        - ADGp1a.sh
+        - ADGp1b.sh
+        - ADGp2a.sh
+        - ADGp2b.sh
+        - ADGp3a.sh
+        - ADGp3b.sh
+        - ADGt
+    - name: primary step1
+      shell: sh ADGp1a.sh chdir=/tmp/
+      become: yes
+      become_user: "{{user}}"
+      when: ip == sourceip
+    - name: standby step1
+      shell: sh ADGp1b.sh chdir=/tmp/
+      become: yes
+      become_user: "{{user}}"
+      when: ip == downip
+    - name: primary step2
+      shell: sh ADGp2a.sh chdir=/tmp/
+      become: yes
+      become_user: "{{user}}"
+      when: ip == sourceip
+    - name: standby step2
+      shell: sh ADGp2b.sh chdir=/tmp/
+      become: yes
+      become_user: "{{user}}"
+      when: ip == downip
+    - name: primary step3
+      shell: sh ADGp3a.sh chdir=/tmp/
+      become: yes
+      become_user: "{{user}}"
+      when: ip == sourceip
+    - name: standby step3
+      shell: sh ADGp3b.sh chdir=/tmp/
+      become: yes
+      become_user: "{{user}}"
+      when: ip == downip

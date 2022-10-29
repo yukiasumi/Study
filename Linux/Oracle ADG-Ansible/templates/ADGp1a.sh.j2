@@ -1,0 +1,8 @@
+#!/bin/bash
+source /home/oracle/.bash_profile
+sqlplus / as sysdba @ ADG0a.sql
+cp $ORACLE_HOME/dbs/orapw* /tmp/
+sqlplus / as sysdba @ ADG1a.sql
+cat ADGt >> $ORACLE_HOME/network/admin/tnsnames.ora
+scp /tmp/orapw* 192.168.10.132:/tmp/
+scp /tmp/init 192.168.10.132:/tmp

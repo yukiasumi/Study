@@ -1,0 +1,17 @@
+{{sourcesid}} =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = {{sourceip}})(PORT = 1521))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = {{sourcesid}})
+    )
+  )
+
+{{downsid}} =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = {{downip}})(PORT = 1521))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = {{downsid}})
+    )
+  )

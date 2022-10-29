@@ -1,0 +1,8 @@
+alter system set log_archive_dest_1='LOCATION=/arch VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{sourcesid}}' scope=both;
+shutdown immediate;
+startup mount;
+alter database archivelog;
+shutdown immediate;
+startup;
+archive log list;
+exit

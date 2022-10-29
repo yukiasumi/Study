@@ -1,0 +1,5 @@
+ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 21 ('/oradata/{{DOWNSID}}/styredo21_01.log', '/oradata/{{DOWNSID}}/styredo21_02.log') SIZE 200M;
+ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 22 ('/oradata/{{DOWNSID}}/styredo22_01.log', '/oradata/{{DOWNSID}}/styredo22_02.log') SIZE 200M;
+ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 23 ('/oradata/{{DOWNSID}}/styredo23_01.log', '/oradata/{{DOWNSID}}/styredo23_02.log') SIZE 200M;
+ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 24 ('/oradata/{{DOWNSID}}/styredo24_01.log', '/oradata/{{DOWNSID}}/styredo24_02.log') SIZE 200M;
+exit

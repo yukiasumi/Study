@@ -1,0 +1,3 @@
+需要配置oracle用户免密(主库到备库即可)
+执行以下命令部署
+ansible-playbook main.yml -i hosts -vv
