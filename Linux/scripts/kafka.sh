@@ -1,25 +1,14 @@
 #!/bin/bash
-host="18.7.41.209"
-#参数1是操作，参数2是topic
+topic=$2
 case $1 in
-#查看有哪些topic
-1)
-kafka-topics --bootstrap-server "$host":9092 --list|grep "$2"
-;;
-#查看kafka消息
-2)
-kafka-console-consumer --bootstrap-server "$host":9e92 --topic "$2" --from-beginning
-;;
-#删除topic
-3)
-kafka-topics --delete --bootstrap-server "$host":9092 --topic "$2"
-;;
-#查看topic数据条数
-4)
-kafka-run-class kafka.tools.GetoffsetShell --broker-list "$host":9092 --topic $2 --time -1
-;;
-#向topic插入数据
-5)
-kafka-console-producer --broker-list "$host" --topic "$2"
-;;
+	1)kafka-topics.sh --bootstrap-server 192.168.10.130:9092 --list;;
+	2)kafka-console-consumer.sh --bootstrap-server 192.168.10.130:9092 --topic $topic --from-beginning;;
+	3)kafka-topics.sh --bootstrap-server 192.168.10.130:9092 --delete --topic $topic;;
+	4)kafka-run-class.sh  kafka.tools.GetOffsetShell --broker-list 192.168.10.130:9092 --topic $topic --time -1;;
+	5)kafka-console-producer.sh --broker-list 192.168.10.130:9092 --topic $topic;;
+	6)kafka-console-consumer.sh --bootstrap-server 192.168.10.130:9092 --topic $topic --from-beginning --max-messages 1 --property print.timestamp=true;;
+	7)result=$(kafka-run-class.sh  kafka.tools.GetOffsetShell --broker-list 192.168.10.130:9092 --topic $topic --time -1)
+	  count=${result:$((${#topic}+3))}
+	  kafka-console-consumer.sh --bootstrap-server 192.168.10.130:9092 --topic $topic --offset $(($count-1)) --max-messages 1 --property print.timestamp=true --partition 0;;
+	8)kafka-topics.sh --bootstrap-server 192.168.10.130:9092 --create --topic $topic --partitions 1 --replication-factor 1;;
 esac

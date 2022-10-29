@@ -1,9 +1,0 @@
-
-
-java:S1989"lHandle the following exception that could be thrown by "setCharacterEncoding": UnsupportedEncodingException.(Ó‹ÊÍüÿÿÿÿ8ÿÃÒ„‡0
-t
-java:S1989"YHandle the following exception that could be thrown by "parseInt": NumberFormatException.(¯ô˜½ÿÿÿÿÿ
-S	java:S106"9Replace this use of System.out or System.err by a logger.(·µ“»ùÿÿÿÿ
-S	java:S106"9Replace this use of System.out or System.err by a logger.(ë€òªşÿÿÿÿ
-N	java:S106"9Replace this use of System.out or System.err by a logger.(ğ“
-S	java:S106"9Replace this use of System.out or System.err by a logger.(»«Åûÿÿÿÿ

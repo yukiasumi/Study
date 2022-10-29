@@ -1,1 +1,0 @@
-input标签的submit为关键字不能当作id使用

@@ -302,8 +302,8 @@ basename命令用于打印目录或者文件的基本名称，显示最后的目
 
 ​	
 ​	
-	* All IP Connect to my host
-	
+​	* All IP Connect to my host
+​	
 	```
 	$ netstat -lantp |  grep ESTABLISHED | awk '{print $5}' |  awk -F: '{print $1}' |  sort -u
 	```
@@ -311,8 +311,8 @@ basename命令用于打印目录或者文件的基本名称，显示最后的目
 
 ​	
 ​	
-	* Repeat a command every 0.1 second
-	
+​	* Repeat a command every 0.1 second
+​	
 	```
 	watch -n 0.1 "ls -lh"
 	```
@@ -320,8 +320,8 @@ basename命令用于打印目录或者文件的基本名称，显示最后的目
 
 ​	
 ​	
-	* Redirect tar extract to another directory
-	
+​	* Redirect tar extract to another directory
+​	
 	```
 	tar xfz filename. tar.gz -C PathToDirectory
 	```
@@ -329,11 +329,11 @@ basename命令用于打印目录或者文件的基本名称，显示最后的目
 
 ​	
 ​	
-	* Copy files between hosts⭐⭐
-	```
-	scp aaa.img target_username@target_host:
-	scp aaa.img target_username@target_host:/tmp/bbb.img
-	
+​	* Copy files between hosts⭐⭐
+​	```
+​	scp aaa.img target_username@target_host:
+​	scp aaa.img target_username@target_host:/tmp/bbb.img
+​	
 	rsync -avrz -e ssh source_dir/ target_username@target_host:/tmp/target_dir/【传文件，前传后】
 	```
 	* diff two different command outputs
@@ -588,5 +588,11 @@ conf
 lib
 可执行文件，系统命令，启动，停止
 bin
+```
+
+```shell
+URL=${URL%$'\r'}-----去掉字符串中看不出的\r
+
+:nohl     取消高亮
 ```
 
