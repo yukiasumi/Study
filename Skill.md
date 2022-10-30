@@ -77,7 +77,7 @@ utf8为可变长度编码(1-4字节)
 1110开头表示3字节场长度，后续10开头表示是后缀
 去掉8位后即是中文的[16位 2字节]
 
-![image-20220912095001322](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220912095001322.png)
+![image-20220912095001322](images\image-20220912095001322.png)
 
 
 
@@ -158,7 +158,7 @@ character-set-server=utf8
 
 ```
 
-![image-20220503133903754](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220503133903754.png)
+![image-20220503133903754](images\image-20220503133903754.png)
 
 3. 重启mysql服务
 ```xml
@@ -169,7 +169,7 @@ net start mysql
 控制面板->管理工具->服务-> 找到mysql服务
 ```
 
-![image-20220503134947550](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220503134947550.png)
+![image-20220503134947550](images\image-20220503134947550.png)
 
 4. 重新登录mysql查看字符集
 
@@ -177,7 +177,7 @@ net start mysql
 show variables like '%char%';
 ```
 
-![image-20220503135512859](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220503135512859.png)
+![image-20220503135512859](images\image-20220503135512859.png)
 
 ```
 character_set_client
@@ -189,7 +189,7 @@ cmd的字符集是gbk，datagrip的字符集是utf8，会根据连接属性自�
 
 
 
-![image-20220503142040580](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220503142040580.png)
+![image-20220503142040580](images\image-20220503142040580.png)
 
 5. 注意：如果执行完上面的操作，字符集修改无效
    请将刚刚修改好的C:\ProgramData\Mysql\Mysql Server 5.7\my.ini文件复制到安装路径下！！！
@@ -629,7 +629,7 @@ fileinputstream可以使用相对路径，当前工程的根目录为起点
 
 全部勾上
 
-![image-20220911152916767](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220911152916767.png)
+![image-20220911152916767](images\image-20220911152916767.png)
 
 ### 快捷键
 
