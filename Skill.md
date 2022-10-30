@@ -1,6 +1,32 @@
 
 
+## Github
 
+```shell
+Failed to connect to github.com port 443 after 21074 ms: Timed out
+
+git config --global -l
+http.proxy=http://127.0.0.1:1080
+https.proxy=http://127.0.0.1:1080
+我们把显示结果分为等号前和等号后，先把自己原先（也就是此刻）显示的proxy保存下来，记住此刻的端口号：1080
+
+删除自己的proxy设置
+git config --global --unset http.proxy
+git config --global --unset https.proxy
+这两个命令都要，因为一个是http，一个是https，分两次执行，--unset后面的http.proxy，就是我们说的等号左边的内容。
+
+重新设置自己的proxy
+这个时候我们保存的之前的proxy端口号就有作用了
+
+执行：
+
+git config --global http.proxy http://127.0.0.1:1080
+git config --global https.proxy http://127.0.0.1:1080
+例子的端口号是1080，把1080换成自己的端口号就可以了。
+
+稍微检查一下，就可以了
+git config --global -l
+```
 
 ## BiliBili N倍速
 
