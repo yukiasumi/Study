@@ -625,6 +625,10 @@ idea只有java source下的类才能识别resource的文件？
 fileinputstream可以使用相对路径，当前工程的根目录为起点
 ```
 
+### 使用lombok插件
+
+![image-20221030202814115](images/image-20221030202814115.png)
+
 #### scala自动补全类型
 
 全部勾上
