@@ -319,7 +319,7 @@ OK
 
 String的数据结构为简单动态字符串(Simple Dynamic String,缩写SDS)。是可以修改的字符串，内部结构实现上类似于Java的ArrayList，采用预分配冗余空间的方式来减少内存的频繁分配.
 
-![img](file:///C:\Users\hakuou\AppData\Local\Temp\ksohtml24320\wps5.jpg) 
+![image-20221108001053012](../images/image-20221108001053012.png)
 
 如图中所示，内部为当前字符串实际分配的空间capacity一般要高于实际字符串长度len。当字符串长度小于1M时，扩容都是加倍现有的空间，如果超过1M，扩容时一次只会多扩1M的空间。需要注意的是字符串最大长度为512M。
 
@@ -483,7 +483,7 @@ List的数据结构为快速链表quickList。
 
 因为普通的链表需要的附加指针空间太大，会比较浪费空间。比如这个列表里存的只是int类型的数据，结构上还需要两个额外的指针prev和next。
 
-![img](file:///C:\Users\hakuou\AppData\Local\Temp\ksohtml24320\wps7.jpg) 
+![image-20221108001029461](../images/image-20221108001029461.png)
 
 Redis将链表和ziplist结合起来组成了quicklist。也就是将多个ziplist使用双向指针串起来使用。这样既满足了快速的插入删除性能，又不会出现太大的空间冗余。
 
