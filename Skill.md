@@ -859,6 +859,136 @@ kafka.common.InconsistentClusterIdException: The Cluster ID kVSgfurUQFGGpHMTBqBP
 
 ## Linux
 
+#### << EOF
+
+EOF是END Of File的缩写,表示自定义终止符.既然自定义,那么EOF就不是固定的,可以随意设置别名,在linux按ctrl-d就代表EOF
+
+==注意：最后的”EOF“必须单独占一行。且需要顶格写，前面不能有任何（包括空格）字符==
+
+　　**$a=<< “EOF” 的意思就是说：下一行开始，直到遇见“EOF”为止，所有的字符都按照指定的格式存入变量a中。**
+
+```perl
+交互式程序 << EOF
+command1
+command2
+...
+EOF
+```
+”EOF“中间的内容将以标准输入的形式输入到”交互式程序“，当shell看到”<<“知道其后面输入的分界符，当shell再次看到分界符时，两个分界符中间的部分将作为标准输入。
+
+       "EOF"一般常和cat命令连用，通过cat配合重定向能够生成文件并追加操作，在它之前先熟悉几个特殊符号：
+
+
+```perl
+<：输入重定向
+>：输出重定向
+>>：输出重定向，进行追加，不会覆盖之前的内容
+<<：标准输入来自命令行的一对分隔号的中间内容
+```
+
+
+```perl
+cat << EOF
+> 100
+> 200
+> 300
+> EOF
+
+cat >> filename << EOF
+100
+200
+300
+EOF
+# cat filename
+100
+200
+300
+```
+
+自动新建分区并挂载的脚本：
+```perl
+#!/bin/bash
+fdisk /dev/mmcblk0  <<eof
+d
+3
+n
+p 
+3
+
+
+w
+eof
+```
+
+如果重定向的操作符是<<-，那么分界符（EOF）所在行的开头部分的制表符（Tab）都将被去除。
+
+
+比如,下面的语句就不会出错
+```perl
+cat <<EOF  
+Hello,world!  
+EOF  
+```
+如果结束分解符EOF前有制表符或者空格，则EOF不会被当做结束分界符，只会继续被当做stdin来输入。
+而<<-就是为了解决这一问题：
+```perl
+cat <<-EOF  
+Hello,world!  
+      EOF  
+```
+上面的写法，虽然最后的EOF前面有多个制表符和空格，但仍然会被当做结束分界符，表示stdin的结束。
+这就是<<和<<-的区别
+
+
+
+
+#### &>/dev/null 2>&1
+
+```perl
+在Linux/Unix中，一般在屏幕上面看到的信息是从stdout (standard output) 或者 stderr (standard error output) 来的。许多人会问，output 就是 output，送到屏幕上不就得了，为什麼还要分成stdout 和 stderr 呢？那是因为通常在 server 的工作环境下，几乎所有的程序都是 run 在 background 的，所以呢，为了方便 debug，一般在设计程序时，就把stdout 送到/存到一个档案，把错误的信息 stderr 存到不同的档案。
+
+哪些是正常的output呢，例如程序开始运行的时间，现在正在上线人数等等。
+
+哪些是错误的output呢，例如无法找到使用者想要去的URL，或者信用卡认证失败等等。
+——————————————————————————————————————————————————
+有了上面这些认知后，回头来讲什麼是 > /dev/null
+这是把 stdout 送到 /dev/null 里面
+
+那什麼是 /dev/null 呢，/dev/null 是 Unix/Linux 里的【无底洞】
+任何的 output 送去了【无底洞】就再也没了。相信我，真的没了！
+
+那麼有人问，在什麼情况下要把 output 送去这无底洞呢？这里没有标准答案，不过一般呢，要是你不想看到 output 或者output 太多太大了，有可能把硬碟给挤爆了的时候，程序的设计就会考虑把 output 送到 /dev/null 了。
+——————————————————————————————————————————————————
+用 /dev/null 2>&1 这样的写法.这条命令的意思是将标准输出和错误输出全部重定向到/dev/null中,也就是将产生的所有信息丢弃.
+
+   下面就为大家来说一下, command > file 2>file  与command > file 2>&1 有什么不同的地方.
+
+      首先 command > file 2>file 的意思是将命令所产生的标准输出信息,和错误的输出信息送到file中 command  > file 2>file 这样的写法,stdout和stderr都直接送到file中, file会被打开两次,这样stdout和stderr会互相覆盖,这样写相当使用了FD1和FD2两个同时去抢占file 的管道.
+      而command >file 2>&1 这条命令就将stdout直接送向file, stderr 继承了FD1管道后,再被送往file,此时,file 只被打开了一次,也只使用了一个管道FD1,它包括了stdout和stderr的内容.
+      从IO效率上,前一条命令的效率要比后面一条的命令效率要低,所以在编写shell脚本的时候,较多的时候我们会用command > file 2>&1 这样的写法.
+ 
+关于shell中：>/dev/null 2>&1 详解
+shell中可能经常能看到：>/dev/null 2>&1
+
+命令的结果可以通过%>的形式来定义输出
+
+分解这个组合：“>/dev/null 2>&1” 为五部分。
+
+1：> 代表重定向到哪里，例如：echo "123" > /home/123.txt
+2：/dev/null 代表空设备文件
+3：2> 表示stderr标准错误
+4：& 表示等同于的意思，2>&1，表示2的输出重定向等同于1
+5：1 表示stdout标准输出，系统默认值是1，所以">/dev/null"等同于 "1>/dev/null"
+
+因此，>/dev/null 2>&1也可以写成“1> /dev/null 2> &1”
+
+那么本文标题的语句执行过程为：
+1>/dev/null ：首先表示标准输出重定向到空设备文件，也就是不输出任何信息到终端，说白了就是不显示任何信息。
+2>&1 ：接着，标准错误输出重定向 到标准输出，因为之前标准输出已经重定向到了空设备文件，所以标准错误输出也重定向到空设备文件。
+```
+
+
+
 #### 无法ping通外网
 
 ```perl
