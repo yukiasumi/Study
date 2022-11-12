@@ -4,9 +4,9 @@
 
 更改tomact/conf下的server.xml文件的8080默认端口可以更改访问端口
 
-![image-20220428202918188](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220428202918188.png)
+![image-20220428202918188](../../images/image-20220428202918188.png)
 
-![image-20220428202944175](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220428202944175.png)
+![image-20220428202944175](../../images/image-20220428202944175.png)
 
 
 
@@ -178,7 +178,7 @@ void service(request,response) - 仍然是抽象的
         - 线程不安全：一个线程需要根据这个实例中的某个成员变量值去做逻辑判断。但是在中间某个时机，另一个线程改变了这个成员变量的值，从而导致第一个线程的执行路径发生了变化
         - 我们已经知道了servlet是线程不安全的，给我们的启发是： 尽量的不要在servlet中定义成员变量。如果不得不定义成员变量，那么不要去：①不要去修改成员变量的值 ②不要去根据成员变量的值做一些逻辑判断
 
-![image-20220430113250357](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220430113250357.png)
+![image-20220430113250357](../../images/image-20220430113250357.png)
 
 <font color=red>将servlet构造方法私有化会报500错误</font>
 
@@ -233,11 +233,11 @@ void service(request,response) - 仍然是抽象的
         Object session.getAttribute(k)
         void removeAttribute(k)
 
-![image-20220430172343902](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220430172343902.png)
+![image-20220430172343902](../../images/image-20220430172343902.png)
 
-![image-20220430145900955](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220430145900955.png)
+![image-20220430145900955](../../images/image-20220430145900955.png)
 
-![image-20220430172409481](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220430172409481.png)
+![image-20220430172409481](../../images/image-20220430172409481.png)
 
 #### 服务器内部转发以及客户端重定向
 
@@ -247,9 +247,9 @@ void service(request,response) - 仍然是抽象的
     2） 客户端重定向： response.sendRedirect("....");
       - 两次请求响应的过程。客户端肯定知道请求URL有变化
       - 地址栏有变化
-![image-20220430204408349](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220430204408349.png)
+![image-20220430204408349](../../images/image-20220430204408349.png)
 
-![image-20220430204751616](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220430204751616.png)
+![image-20220430204751616](../../images/image-20220430204751616.png)
 
 #### Thymeleaf - 视图模板技术
 
@@ -270,7 +270,7 @@ void service(request,response) - 仍然是抽象的
     6） 使用thymeleaf的标签
       th:if   ,  th:unless   , th:each   ,   th:text
 
-![image-20220430214158143](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220430214158143.png)
+![image-20220430214158143](../../images/image-20220430214158143.png)
 
 // 200 : 正常响应
 // 404 : 找不到资源
@@ -317,7 +317,7 @@ public class ServletTest02 extends HttpServlet {
 }
 ```
 
-![request请求作用域](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\01.Request保存作用域.png)
+![request请求作用域](../../images/01.Request保存作用域.png)
 
 #### session：一次会话范围有效
 
@@ -349,7 +349,7 @@ public class ServletTest04 extends HttpServlet {
 }
 ```
 
-![session作用域](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\02.Session保存作用域.png)
+![session作用域](../../images/02.Session保存作用域.png)
 
 #### application： 一次应用程序范围有效
 不关闭tomcat就能访问到
@@ -384,12 +384,12 @@ public class ServletTest06 extends HttpServlet {
 
 ```
 
-![application作用域](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\03.Application保存作用域.png)
+![application作用域](../../images/03.Application保存作用域.png)
 ### 路径问题
 1） 相对路径
 2） 绝对路径
 
-<img src="C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\04.相对路径_绝对路径_base标签_@{}.png" alt="路径"  />
+<img src="../../images/04.相对路径_绝对路径_base标签_@{}.png" alt="路径"  />
 
 ### Thymeleaf
 
