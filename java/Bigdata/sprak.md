@@ -736,7 +736,7 @@ def cogroup[W](other: RDD[(K, W)]): RDD[(K, (Iterable[V], Iterable[W]))]
 
 #### 案例实操
 
-![image-20220927200539668](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220927200539668.png)
+![image-20220927200539668](../../images/image-20220927200539668.png)
 
 ```scala
 //TODO 案例实操
