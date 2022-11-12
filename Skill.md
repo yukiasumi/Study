@@ -859,6 +859,34 @@ kafka.common.InconsistentClusterIdException: The Cluster ID kVSgfurUQFGGpHMTBqBP
 
 ## Linux
 
+#### 引号嵌套
+
+**双引号里双引号需转义，单引号里单引号需转义**
+
+最外层双引号
+
+第二层转义引号并再包一层双引号 `"\""`
+
+第三层可使用单引号
+
+以下两种实例皆可执行
+
+```perl
+docker exec -it mysql bash -c "mysql -uroot -proot -e "\"" show variables like 'log_%''; "\"""
+
+docker exec -it mysql-slave bash -c "mysql -uroot -proot -e "\"" show variables like '"log_%"'; "\"""
+```
+
+#### 配置免密
+
+SSH提供了另外一种可以免去输入密码过程的登录方式：公钥登录。流程如下：
+
+ssh-keygen 生成公私密钥对
+ssh-copy-id 将公钥复制到目标服务器
+==拥有私钥的服务器即可免密连接拥有公钥的服务器==
+
+![image-20221111091543075](images/image-20221111091543075.png)
+
 #### << EOF
 
 EOF是END Of File的缩写,表示自定义终止符.既然自定义,那么EOF就不是固定的,可以随意设置别名,在linux按ctrl-d就代表EOF
