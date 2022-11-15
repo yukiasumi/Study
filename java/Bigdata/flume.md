@@ -145,7 +145,7 @@ hive (default)>
 
 （5）在 HDFS 上查看文件
 
-![image-20220821161813536](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220821161813536.png)
+![image-20220821161813536](../../images/image-20220821161813536.png)
 
 #### **实时监控目录下多个新文件**
 
@@ -223,7 +223,7 @@ bin/flume-ng agent --conf conf/ --name a3 --conf-file job/flume-dir-hdfs.conf
 
 （4）查看 HDFS 上的数据
 
-![image-20220821163207483](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220821163207483.png)
+![image-20220821163207483](../../images/image-20220821163207483.png)
 
 #### 实时监控目录下的多个追加文件
 
@@ -299,4 +299,4 @@ bin/flume-ng agent --conf conf/ --name a3 --conf-file job/flume-taildir-hdfs.con
 
 （4）查看 HDFS 上的数据
 
-![image-20220821194757464](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220821194757464.png)
+![image-20220821194757464](../../images/image-20220821194757464.png)

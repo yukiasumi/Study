@@ -82,7 +82,7 @@ Leader，而这个端口就是用来执行选举时服务器相互通信的端�
 
  ### ==选举机制（面试重点）==
 
-![image-20220802220928848](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220802220928848.png)
+![image-20220802220928848](../../images/image-20220802220928848.png)
 
 #### **Zookeeper选举机制——第一次启动**
 
@@ -171,7 +171,7 @@ esac
 [zk: hadoop102:2181(CONNECTED) 1] help
 ```
 
-![image-20220802224118198](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220802224118198.png)
+![image-20220802224118198](../../images/image-20220802224118198.png)
 
 ==（1）czxid：创建节点的事务 zxid==
 
