@@ -793,15 +793,22 @@ http://hadoop103:8081
 
 1. 下载并解压安装包，并将解压后的安装包重命名为 flink-1.13.0-yarn，本节的相关操作都将默认在此安装路径下执行。
 
-2. 配置环境变量，增加环境变量配置如下：
+```perl
+tar -zxvf flink-1.13.0-bin-scala_2.12.tgz -C /opt/module/
+mv flink-1.13.0 flink-1.13.0-yarn
+```
+
+1. 配置环境变量，增加环境变量配置如下：
 
 ```shell
 sudo vim /etc/profile.d/my_env.sh
 
-HADOOP_HOME=/opt/hadoop-3.1.3/
+HADOOP_HOME=/opt/module/hadoop-3.1.3/
 export PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin
 export HADOOP_CONF_DIR=${HADOOP_HOME}/etc/hadoop
 export HADOOP_CLASSPATH=`hadoop classpath`
+
+source /etc/profile
 ```
 
 **这里必须保证设置了环境变量 HADOOP_CLASSPATH。**
@@ -814,21 +821,36 @@ start-yarn.sh
 ```
 
 ```shell
-[atguigu@hadoop102 ~]$ jps
-5190 Jps
-5062 NodeManager
-4408 NameNode
-4589 DataNode
-[atguigu@hadoop103 ~]$ jps
-5425 Jps
-4680 ResourceManager
-5241 NodeManager
-4447 DataNode
-[atguigu@hadoop104 ~]$ jps
-4731 NodeManager
-4333 DataNode
-4861 Jps
-4478 SecondaryNameNode
+[atguigu@hadoop102 module]$ myhadoop.sh start
+ =================== 启动 hadoop集群 ===================
+ --------------- 启动 hdfs ---------------
+Starting namenodes on [hadoop102]
+Starting datanodes
+Starting secondary namenodes [hadoop104]
+ --------------- 启动 yarn ---------------
+Starting resourcemanager
+Starting nodemanagers
+ --------------- 启动 historyserver ---------------
+[atguigu@hadoop102 module]$
+[atguigu@hadoop102 module]$ jpsall
+=============== hadoop102 ===============
+8528 JobHistoryServer
+8309 NodeManager
+7917 DataNode
+7743 NameNode
+8623 Jps
+=============== hadoop103 ===============
+4688 ResourceManager
+4489 DataNode
+4825 NodeManager
+5195 Jps
+=============== hadoop104 ===============
+97876 DataNode
+97999 SecondaryNameNode
+98095 NodeManager
+98239 Jps
+[atguigu@hadoop102 module]$
+
 ```
 
 4. 进入 conf 目录，修改 flink-conf.yaml 文件，修改以下配置，这些配置项的含义在进行 Standalone 模式配置的时候进行过讲解，若在提交命令中不特定指明，这些配置将作为默认配置。
@@ -845,6 +867,13 @@ parallelism.default: 1
 ### 3.3.2 会话模式部署
 
 YARN 的会话模式与独立集群略有不同，需要首先申请一个 YARN 会话（YARN session）来启动 Flink 集群。
+
+```java
+        //从参数中提取主机名和端口号
+        ParameterTool parameterTool = ParameterTool.fromArgs(args);
+        String hostname = parameterTool.get("host");
+        int port = parameterTool.getInt("port");
+```
 
 #### 3.3.2.1 启动集群
 
@@ -877,17 +906,19 @@ YARN 的会话模式也不会把集群资源固定， 会按照需求动态分�
 YARN Session 启动之后会给出一个 web UI 地址以及一个 YARN application ID，用户可以通过 web UI 或者命令行两种方式提交作业。
 
 ```shell
-2022-11-15 19:51:37,712 INFO  org.apache.hadoop.yarn.client.api.impl.YarnClientImpl        [] - Submitted application application_1668512796586_0001
-2022-11-15 19:51:37,713 INFO  org.apache.flink.yarn.YarnClusterDescriptor                  [] - Waiting for the cluster to be allocated
-2022-11-15 19:51:37,716 INFO  org.apache.flink.yarn.YarnClusterDescriptor                  [] - Deploying cluster, current state ACCEPTED
-2022-11-15 19:51:47,130 INFO  org.apache.flink.yarn.YarnClusterDescriptor                  [] - YARN application has been deployed successfully.
-2022-11-15 19:51:47,131 INFO  org.apache.flink.yarn.YarnClusterDescriptor                  [] - Found Web Interface neptune:28971 of application 'application_1668512796586_0001'.
-JobManager Web Interface: http://neptune:28971
+2022-11-15 09:10:09,099 INFO  org.apache.flink.runtime.util.config.memory.ProcessMemoryUtils [] - The derived from fraction jvm overhead memory (160.000mb (167772162 bytes)) is less than its min value 192.000mb (201326592 bytes), min value will be used instead
+2022-11-15 09:10:09,113 INFO  org.apache.flink.yarn.YarnClusterDescriptor                  [] - Submitting application master application_1668474185976_0001
+2022-11-15 09:10:09,496 INFO  org.apache.hadoop.yarn.client.api.impl.YarnClientImpl        [] - Submitted application application_1668474185976_0001
+2022-11-15 09:10:09,496 INFO  org.apache.flink.yarn.YarnClusterDescriptor                  [] - Waiting for the cluster to be allocated
+2022-11-15 09:10:09,499 INFO  org.apache.flink.yarn.YarnClusterDescriptor                  [] - Deploying cluster, current state ACCEPTED
+2022-11-15 09:10:20,640 INFO  org.apache.flink.yarn.YarnClusterDescriptor                  [] - YARN application has been deployed successfully.
+2022-11-15 09:10:20,642 INFO  org.apache.flink.yarn.YarnClusterDescriptor                  [] - Found Web Interface hadoop103:44391 of application 'application_1668474185976_0001'.
+JobManager Web Interface: http://hadoop103:44391
 ```
 
-http://neptune:28971 为flink界面
+http://hadoop103:44391 为flink界面
 
-![image-20221114230550540](../../images/image-20221114230550540.png)
+![image-20221115091839150](../../images/image-20221115091839150.png)
 
 #### 3.3.2.2 提交作业
 
@@ -897,25 +928,32 @@ http://neptune:28971 为flink界面
 
 ##### 3.3.2.2.2 命令行提交
 
+```perl
+#提交任务前先打卡nc
+[atguigu@hadoop102 ~]$ nc -lk 7777
+```
+
 1. 将 Standalone 模式讲解中打包好的任务运行 JAR 包上传至集群
 
 2. 执行以下命令将该任务提交到已经开启的 Yarn-Session 中运行。
 
 ```perl
-flink run -c org.neptune.wc.StreamWordCount /root/Flink-1.0-SNAPSHOT.jar
+flink run -c org.neptune.wc.StreamWordCount Flink-1.0-SNAPSHOT.jar --host hadoop102 --port 7777
 ```
 
 客户端可以自行确定 JobManager 的地址，也可以通过-m 或者-jobmanager 参数指定JobManager 的地址，JobManager 的地址在 YARN Session 的启动页面中可以找到。
 
+![image-20221115091645147](../../images/image-20221115091645147.png)
+
 3. 任务提交成功后，可在 YARN 的 Web UI 界面查看运行情况。
 
-![image-20221114230926475](../../images/image-20221114230926475.png)
+![image-20221115091718445](../../images/image-20221115091718445.png)
 
 从图中可以看到创建的 Yarn-Session 实际上是一个 Yarn 的Application，并且有唯一的 Application ID。
 
 4. 也可以通过 Flink 的 Web UI 页面查看提交任务的运行情况。
 
-![image-20221114223421003](../../images/image-20221114223421003.png)
+![image-20221115091621094](../../images/image-20221115091621094.png)
 
 ### 3.3.3 单作业模式部署
 
@@ -1039,4 +1077,399 @@ http://{JobManagerHost:Port}/api/v1/namespaces/default/services/fink-jobmanager:
 ```
 
 # 4 Flink运行架构
+
+## 4.1 系统架构
+
+### 4.1.1 整体构成
+
+两大组件
+
+* 作业管理器（JobManger）—Master，负责管理调度，所以在不考虑高可用的情况下只能有一个
+* 任务管理器（TaskManager）—Worker、Slave，负责执行任务处理数据，所以可以有一个或多个
+
+![image-20221115105220698](../../images/image-20221115105220698.png)
+
+* 客户端只负责作业的提交。
+  * 调用程序的 main 方法，将代码转换成数据流图（Dataflow Graph）并生成作业图（JobGraph），发送给 JobManager。
+  * 提交后，任务的执行就跟客户端没有关系了，可以在客户端选择断开与 JobManager 的连接, 也可以继续保持连接。
+
+之前在命令行提交作业时，加上的`-d`参数，就是表示分离模式（detached mode)，也就是断开连接。
+
+### 4.1.2 作业管理器（JobManager）
+
+JobManager 是集群任务管理和调度的核心，控制应用执行的主进程。
+
+* 每个应用JobManager 唯一
+* 高可用（HA）场景， 一个leader，多个备用节点standby
+
+JobManger 又包含 3 个不同的组件。
+
+#### 4.1.2.1 JobMaster
+* JobMaster 最核心的组件，负责处理单独的作业（Job）
+  *  JobMaster和Job 一一对应的，集群可以有多个Job, 每个 Job 都有一个自己的 JobMaster。
+  *  作业提交时，JobMaster 会先接收到客户端提交的应用
+     * Jar 包
+     * 数据流图（dataflow graph）
+     * 作业图（JobGraph）
+  * 把作业图（JobGraph） 转换成一个物理层面的数据流图—执行图（ExecutionGraph），它包含了所有可以并发执行的任务
+  * 向资源管理器（ResourceManager）发出请求，申请执行任务必要的资源、
+  * 获取到足够的资源，就会将执行图分发到真正运行它们的 TaskManager 上
+  * 运行过程中，JobMaster 会负责所有需要中央协调的操作，比如检查点（checkpoints）的协调
+
+#### 4.1.2.2 资源管理器（ResourceManager）
+
+* ResourceManager 主要负责资源的分配和管理，在 Flink 集群中只有一个
+* 资源主要是指 TaskManager 的任务槽（task slots）
+  * 任务槽：用来执行计算的一组 CPU 和内存资源。每一个任务（Task）都需要分配到一个 slot 上执行
+
+* Flink 内置的 ResourceManager 和其他资源管理平台（比如 YARN）的ResourceManager 区别
+  * Flink 的 ResourceManager 只能分发可用 TaskManager 的任务槽，不能单独启动新TaskManager
+  * 资源管理平台的ResourceManager 
+    * 可以分配有空闲槽位的 TaskManager 给 JobMaster
+    * 没有足够的任务槽时，可向资源提供平台发起会话，请求提供启动 TaskManager 进程的容器
+    * 负责停掉空闲的 TaskManager，释放计算资源
+
+#### 4.1.2.3 分发器（Dispatcher）
+
+* 主要负责提供一个 REST 接口，用来提交应用
+* 为每一个新提交的作业启动一个新的 JobMaster 组件
+* Dispatcher 也会启动一个 Web UI，用来方便地展示和监控作业执行的信息
+* Dispatcher 在架构中并不是必需的，在不同的部署模式下可能会被忽略掉
+
+### 4.1.3 任务管理器（TaskManager）
+
+TaskManager 是 Flink 中的工作进程，数据流的具体计算就是它来做的（Worker）。
+
+* Flink 集群中必须至少有一个 TaskManager，分布式计算会有多个 TaskManager 
+* 每一个 TaskManager 都包含了一定数量的任务槽（task slots）
+* Slot是资源调度的最小单位，slot 的数量限制了 TaskManager 能够并行处理的任务数量
+
+作业启动后
+
+* TaskManager 会向资源管理器注册它的 slots
+* 收到资源管理器的指令后，TaskManager 就会将一个或者多个槽位提供给 JobMaster 调用
+* JobMaster 就可以分配任务来执行了
+* 在执行过程中，TaskManager 可以缓冲数据，还可以跟其他运行同一应用的 TaskManager交换数据。
+
+## 4.2 作业提交流程
+
+### 4.2.1 高层级抽象视角
+
+![image-20221115165607936](../../images/image-20221115165607936.png)
+
+1. 客户端（App）通过分发器提供的 REST 接口，将作业提交给JobManager。
+
+2. 由分发器启动 JobMaster，并将作业（包含 JobGraph）提交给 JobMaster。
+
+3. JobMaster 将 JobGraph 解析为可执行的 ExecutionGraph，得到所需的资源数量，然后
+   向资源管理器请求资源（slots）。
+
+4. 资源管理器判断当前是否由足够的可用资源；如果没有，启动新的 TaskManager。
+
+5. TaskManager 启动之后，向 ResourceManager 注册自己的可用任务槽（slots）。
+
+6. 资源管理器通知 TaskManager 为新的作业提供 slots。
+
+7. TaskManager 连接到对应的 JobMaster，提供 slots。
+
+8. JobMaster 将需要执行的任务分发给 TaskManager。
+
+9. TaskManager 执行任务，互相之间可以交换数据。
+
+* 根据部署模式、集群环境不同（例如 Standalone、YARN、K8S 等），其中一些步骤可能会不同或被省略，也可能有些组件会运行在同一个 JVM 进程中。
+
+* 独立集群环境的会话模式，就是需要先启动集群，如果资源不够，只能等待资源释放，而不会直接启动新的 TaskManager。
+
+### 4.2.2 独立模式（Standalone）
+
+除第 4 步不会启动 TaskManager，而且直接向已有的 TaskManager 要求资源，其他步骤与抽象流程一致。
+
+![image-20221115175707502](../../images/image-20221115175707502.png)
+
+### 4.2.3 YARN 集群
+
+#### 4.2.3.1 会话（Session）模式
+
+**会话模式需要先启动一个 YARN session，这个会话会创建一个 Flink 集群。**
+
+
+
+![image-20221115180158067](../../images/image-20221115180158067.png)
+
+除了**请求资源时要上报YARN 的资源管理器**，其他与所述抽象流程一样。
+
+![image-20221115180215476](../../images/image-20221115180215476.png)
+
+#### 4.2.3.2 单作业（Per-Job）模式
+
+单作业模式Flink 集群不会预先启动，而是在提交作业时，才启动新的 JobManager。
+
+区别在于**JobManager 的启动方式，以及省去了分发器**。
+
+当第 2 步作业提交给JobMaster，之后的流程就与会话模式完全一样了。
+
+![image-20221115180833740](../../images/image-20221115180833740.png)
+
+#### 4.2.3.3 应用（Application）模式
+
+* 应用模式与单作业模式的提交流程非常相似
+
+* 初始提交给 YARN 资源管理器的不再是具体的作业，而是整个应用
+
+* 一个应用中可能包含了多个作业，这些作业都将在 Flink 集群中启动各自对应的 JobMaster
+
+## 4.3 重要概念
+
+### 4.3.1 数据流图（Dataflow Graph）
+
+* Flink 是流式计算框架。它的程序结构，其实就是定义了一连串的处理操作，每一个数据输入之后都会依次调用每一步计算。
+
+* 在 Flink 代码中，我们定义的每一个处理转换操作都叫作**算子（Operator）**，所以我们的程序可以看作是一串算子构成的管道，数据则像水流一样有序地流过。
+* 所有的 Flink 程序都可以归纳为由三部分构成：Source、Transformation 和 Sink。
+  * `Source` ——源算子，负责读取数据源。
+  * `Transformation` ——转换算子，利用各种算子进行处理加工。
+  * `Sink` ——下沉算子，负责数据的输出。
+
+* Flink 程序映射成的算子，按照逻辑顺序连接在一起的**有向无环图（DAG）**叫**数据流图（dataflow graph）**or **逻辑数据流（logical dataflow)**
+* 每一条数据流（dataflow）以一个或多个 source 算子开始，以一个或多个 sink 算子结束。
+
+* 提交作业之后，打开 Flink 自带的 Web UI，点击作业就能看到对应的 dataflow
+* 在大部分情况下，dataflow 中的算子，和程序中的转换运算是一一对应的关系。
+
+以下数据流图可以看到 Source、Transformation、Sink 三部分。
+
+![image-20221115211129142](../../images/image-20221115211129142.png)
+
+### 4.3.2 并行度（Parallelism）
+
+#### 4.3.2.1 并行计算
+
+* 任务并行：不同的算子操作任务，分配到不同的节点上执行。
+
+* 数据并行：一个算子被拆分成了多个并行的子任务（subtasks），分发到不同节点执行。
+
+#### 4.3.2.2 并行度
+
+* 一个特定算子的子任务（subtask）的个数被称之为其并行度（parallelism）。
+
+* 包含并行子任务的数据流，就是并行数据流，它需要多个分区（stream partition）来分配并行任务。
+
+* **一个流程序的并行度，就是其所有算子中最大的并行度。**
+* 一个程序中，不同的算子可能具有不同的并行度。
+
+如图 4-8 所示，当前数据流中有 source、map、window、sink 四个算子，除最后 sink，其他算子的并行度都为 2。整个程序包含了 7 个子任务，至少需要 2 个分区来并行执行。这段流处理程序的并行度就是 2。
+
+![image-20221115214636214](../../images/image-20221115214636214.png)
+
+#### 4.3.2.3 并行度的设置
+
+在 Flink 中，可以用不同的方法来设置并行度，它们的有效范围和优先级别也是不同的。
+
+* 代码中设置
+
+  * 在算子后跟着调用 setParallelism()方法
+
+    ```java
+    //只针对当前算子有效
+    stream.map(word -> Tuple2.of(word, 1L)).setParallelism(2);
+    ```
+
+  * 直接调用执行环境的 setParallelism()方法，全局设定并行度
+
+    ```java
+    //代码中所有算子有效，无法动态扩容，一般不使用
+    env.setParallelism(2);
+    ```
+
+* 提交应用时设置
+
+  * 使用 flink run 提交应用时，增加`-p `参数来指定当前应用程序执行的并行度，类似于执行环境的全局设置
+
+    ```perl
+    flink run -p 2 -c org.neptune.wc.StreamWordCount Flink-1.0-SNAPSHOT.jar
+    ```
+
+  * 在 Web UI 上提交作业时在对应输入框中直接添加并行度。
+
+* 在配置文件flink-conf.yaml 中设置`parallelism.default`，对整个集群有效
+
+  ```yaml
+  parallelism.default: 2
+  ```
+
+  * 初始值为 1。
+  * 代码和应用提交未设置，会采用此并行度。
+
+* 开发环境中，没有配置文件，默认并行度就是当前机器的 CPU 核心数。
+
+**优先级**
+
+1. 代码中是否单独指定并行度
+2. 代码中执行环境全局设置的并行度。
+3. 提交时-p 参数指定的并行度。
+4. 集群配置文件中的默认并行度。
+
+**算子的并行度有时会受到自身具体实现的影响。**
+
+对于本身就是非并行的 Source 算子（如socketTextStream），无论怎么设置，它在运行时的并行度都是 1
+
+==建议在代码中只针对算子设置并行度，不设置全局并行度，方便提交作业时进行动态扩容。==
+
+### 4.3.3 算子链（Operator Chain）
+
+#### 4.3.3.1 算子间的数据传输
+
+* 一对一（One-to-one，forwarding），数据流都是相同分区的算子，无shuffle，类似于 Spark 中的窄依赖
+* 重分区（Redistributing），数据流包含不同分区算子，有shuffle，类似于 Spark 中的宽依赖
+
+![image-20221115222248556](../../images/image-20221115222248556.png)
+
+#### 4.3.3.2 合并算子链
+
+相同分区的算子合并成一个算子，的技术被称为算子链（Operator Chain）。
+
+![image-20221115222200650](../../images/image-20221115222200650.png)
+
+### 4.3.4 作业图（JobGraph）与执行图（ExecutionGraph）
+
+Flink 中任务调度执行的图，按照生成顺序可以分成四层：
+
+逻辑流图（StreamGraph）→ 作业图（JobGraph）→ 执行图（ExecutionGraph）→ 物理图（Physical Graph）
+
+==重点： 作业图（JobGraph）和执行图（ExecutionGraph）==
+
+#### 4.3.4.1 逻辑流图（StreamGraph）
+
+* 根据DataStream API 编写的代码生成的最初的 DAG 图，用来表示程序的拓扑结构。
+* 一般在客户端完成。
+
+#### 4.3.4.2 作业图（JobGraph）
+
+* StreamGraph 经过优化后生成作业图，是提交给 JobManager 的数据结构。
+* 优化：将多个符合条件的节点合并成一个任务节点，形成算子链，减少数据交换的消耗。
+* 一般在客户端完成
+* 作业提交时传递给 JobMaster。
+
+#### 4.3.4.3 执行图（ExecutionGraph）
+
+* JobMaster 收到 JobGraph 后，会根据它来生成执行图。
+* 是作业图 的并行化版本，是调度层最核心的数据结构。
+* 与作业图 最大的区别是按照并行度对并行子任务进行了拆分，并明确了任务间数据传输的方式。
+
+#### 4.3.4.4 物理图（Physical Graph）
+
+* JobMaster 生成执行图后，分发给 TaskManager生成物理图。
+* 这只是具体执行层面的图，并不是一个具体的数据结构。
+* 在执行图的基础上，进一步确定数据存放的位置和收发的具体方式。
+* TaskManager 根据物理图对传递来的数据进行处理计算。
+
+### 4.3.5 任务（Tasks）和任务槽（Task Slots）
+
+#### 4.3.5.1 任务槽（Task Slots）
+
+* ==Flink 中每一个 TaskManager（worker）都是一个 JVM 进程==
+
+* ==它可以启动多个独立的线程，来并行执行多个子任务（subtask）。==
+
+每个任务槽（task slot）是 TaskManager 拥有计算**资源的一个固定大小的子集**。
+
+**这些资源就是用来独立执行一个子任务的。**
+
+* 下图中，一个 TaskManager 有三个 slot，那么它会将管理的==内存==平均分成三份，每个 slot 独自占据一份。
+
+* 这样，在 slot 上执行一个子任务时，就不需要跟来自其他作业的任务去竞争内存资源了。
+
+* 所以现在只要 2 个 TaskManager，就可以并行处理分配好的 5 个任务了
+
+![image-20221115224804661](../../images/image-20221115224804661.png)
+
+#### 4.3.5.2 任务槽数量的设置
+
+在集群配置文件flink-conf.yaml设置`taskmanager.numberOfTaskSlots`
+
+```yaml
+taskmanager.numberOfTaskSlots: 8
+```
+
+通过调整 slot 的数量，可以控制子任务之间的隔离级别。
+
+* TaskManager
+  * 隔离级别高，进程隔离，完全独立运行
+  * 彼此间的影响可以降到最小
+
+* slot
+  * 隔离级别低，线程隔离，可共享 TCP 连接和心跳消息，共享数据集和数据结构
+  * 减少运行开销，提升性能
+  * 仅隔离内存，不会涉及 CPU 的隔离
+
+**具体应用时，将 slot 数量配置为机器的 CPU 核心数，可避免不同任务之间对 CPU 的竞争。**
+
+这也是开发环境默认并行度设为机器 CPU 数量的原因。
+
+#### 4.3.5.3 任务对任务槽的共享
+
+==slot共享：同一分区的所有算子在同一个slot执行==
+
+每个任务节点的并行子任务一字排开，占据不同的 slot
+
+不同的任务节点的子任务可以共享 slot。
+
+一个 slot 中，所有任务都在这里执行，我们把它叫作保存了整个作业的运行管道（pipeline）。
+
+![image-20221115230818414](../../images/image-20221115230818414.png)
+
+**slot共享优点**
+
+* 当资源密集型和非密集型的任务同时放到一个 slot 中，可以自行分配资源占用比例，**保证资源充分利用**
+* 允许保存完整的作业管道，某个 TaskManager出现故障宕机，其他节点不受影响，**作业的任务可继续执行**
+
+**slot 共享组（SlotSharingGroup）**
+
+Flink 默认允许 slot 共享，如果希望某个算子对应的任务完全独占一个 slot，或者只有某一部分算子共享 slot。
+
+可以通过设置**slot 共享组（SlotSharingGroup）**手动指定：
+
+```java
+.map(word -> Tuple2.of(word, 1L)).slotSharingGroup(“1”);
+```
+
+* 只有属于同一个 slot 共享组的子任务，才会开启 slot 共享
+
+* 不同组之间的任务是完全隔离的，必须分配到不同的 slot 上。
+
+* 需要的 slot 数量，就是各个 slot共享组最大并行度的总和。
+
+#### 4.3.5.4 任务槽和并行度的关系
+
+整个流处理程序的并行度 = 所有算子并行度中最大的那个 = 运行程序需要的 slot 数量
+
+==结论：充分利用资源时并行度=任务槽数量==
+
+举例：
+
+slot数量为9
+
+source→ flatMap→ reduce→ sink
+
+source→ flatMap合并为一个算子
+
+3个任务节点
+
+**并行度默认是1**
+
+![image-20221115233236120](../../images/image-20221115233236120.png)
+
+**提交作业时，并行度设置为2**
+
+![image-20221115233308592](../../images/image-20221115233308592.png)
+
+**直接将并行度设置为9（与slot一样）**
+
+![image-20221115233409988](../../images/image-20221115233409988.png)
+
+
+
+**输出是写入文件，不希望并行写入多个文件，讲 sink 算子的并行度设置为 1。**
+
+![image-20221115233417755](../../images/image-20221115233417755.png)
 
