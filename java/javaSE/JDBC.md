@@ -2,7 +2,7 @@
 
 JDBC封装分层目录
 
-![image-20220124094929039](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220124094929039.png)
+![image-20220124094929039](../../images/image-20220124094929039.png)
 
 ```
  dao （代码分层）
@@ -393,7 +393,7 @@ public class Test26 {
 
 ```
 
-![image-20220206115430004](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220206115430004.png)
+![image-20220206115430004](../../images/image-20220206115430004.png)
 
 修改数据库的字符集：alter database dbname character set utf8;
 

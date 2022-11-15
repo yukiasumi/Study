@@ -129,9 +129,9 @@ public static void main(String[] args) {
 <font color =FF0000 size = 4>* 运行状态</font>
 <font color =FF0000 size =4>* 阻塞状态</font>
 <font color =FF0000 size = 4>* 死亡状态</font>
-![image-20220126151050200](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220126151050200.png)
+![image-20220126151050200](../../images/image-20220126151050200.png)
 
-![image-20220127104048133](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220127104048133.png)
+![image-20220127104048133](../../images/image-20220127104048133.png)
 
 
 ```java
@@ -798,7 +798,7 @@ class MyClass {
 
 ## <font color=FF0000>死锁</font>
 
-![image-20220127181601142](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220127181601142.png)
+![image-20220127181601142](../../images/image-20220127181601142.png)
 
 ```java
 /**
@@ -1102,7 +1102,7 @@ public class ThreadTest15 {
   		- 还有一个notifyAll()方法：
   			- 这个方法是唤醒o对象上处于等待的所有线程。
 
-![image-20220128194354050](C:\Users\hakuou\AppData\Roaming\Typora\typora-user-images\image-20220128194354050.png)
+![image-20220128194354050](../../images/image-20220128194354050.png)
 
 ```java
 import java.util.ArrayList;
