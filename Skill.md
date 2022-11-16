@@ -867,6 +867,12 @@ kafka.common.InconsistentClusterIdException: The Cluster ID kVSgfurUQFGGpHMTBqBP
 
 ## Linux
 
+#### 去除空白行
+
+URL=${URL%$'\r'}-----去掉字符串中看不出的\r
+
+:nohl     取消高亮
+
 #### 引号嵌套
 
 **双引号里双引号需转义，单引号里单引号需转义**
