@@ -1949,3 +1949,152 @@ returns(new TypeHint<Tuple2<Integer, SomeType>>(){})
 
 ![image-20221116214439875](../../images/image-20221116214439875.png)
 
+### 5.3.1 基本转换算子
+
+#### 5.3.3.**1.** 映射（map）
+
+![image-20221117204233647](../../images/image-20221117204233647.png)
+
+```java
+public <R> SingleOutputStreamOperator<R> map(MapFunction<T, R> mapper){}
+```
+
+```java
+package org.neptune.datastreamapi;
+
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.neptune.datastreamapi.pojo.Event;
+
+public class TransMapTest {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        DataStreamSource<Event> stream = env.fromElements(
+                new Event("Mary", "./home", 1000L),
+                new Event("Bob", "./cart", 2000L)
+        );
+
+        // 传入匿名类，实现 MapFunction
+        stream.map(new MapFunction<Event, String>() {
+            @Override
+            public String map(Event e) throws Exception {
+                return e.user;
+            }
+        });
+
+        // 传入 MapFunction 的实现类
+        stream.map(new UserExtractor()).print();
+
+        //lambda表达式，小心泛型擦除
+        stream.map(data -> data.user);
+
+        env.execute();
+    }
+
+    public static class UserExtractor implements MapFunction<Event, String> {
+        @Override
+        public String map(Event e) throws Exception {
+            return e.user;
+        }
+    }
+}
+```
+
+#### 5.3.3.2 过滤（filter）
+
+![image-20221117214931932](../../images/image-20221117214931932.png)
+
+```java
+package org.neptune.datastreamapi;
+
+import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.neptune.datastreamapi.pojo.Event;
+
+public class TransformFilterTest {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+        DataStreamSource<Event> stream = env.fromElements(
+                new Event("Mary", "./home", 1000L),
+                new Event("Bob", "./cart", 2000L));
+
+        //匿名内部类方式
+        SingleOutputStreamOperator<Event> result = stream.filter(new FilterFunction<Event>() {
+            @Override
+            public boolean filter(Event value) throws Exception {
+                return value.user.equals("Mary");
+            }
+        });
+
+        //lambda表达式，无泛型擦除问题
+        stream.filter(data->data.user.equals("Bob")).print();
+
+        result.print();
+
+        env.execute();
+
+
+    }
+
+}
+
+```
+
+#### 5.3.3.3 扁平映射
+
+![image-20221117220004672](../../images/image-20221117220004672.png)
+
+```java
+package org.neptune.datastreamapi;
+
+import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.common.typeinfo.TypeHint;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.util.Collector;
+import org.neptune.datastreamapi.pojo.Event;
+
+public class TransformFlatMap {
+
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        DataStreamSource<Event> stream = env.fromElements(
+                new Event("Mary", "./home", 1000L),
+                new Event("Bob", "./cart", 2000L)
+        );
+
+        //内部类方式
+        SingleOutputStreamOperator<Object> result = stream.flatMap(new FlatMapFunction<Event, Object>() {
+            @Override
+            public void flatMap(Event value, Collector<Object> out) throws Exception {
+                out.collect(value.user);
+                out.collect(value.url);
+                out.collect(value.timestamp.toString());
+            }
+        });
+
+        result.print("result");
+
+        //lambda表达式，需要指定返回类型
+        stream.flatMap((Event in, Collector<String> out) -> out.collect(in.user))
+                .returns(new TypeHint<String>(){}).print("record");
+
+        env.execute();
+    }
+
+}
+
+```
+
+### 5.3.2 聚合算子（Aggregation）
+
+#### 5.3.2.1 按键分区![image-20221117221226266](../../images/image-20221117221226266.png)
+
