@@ -222,6 +222,10 @@ ALTER DATABASE DATAFILE 'c:\SmartDB01.ora' AUTOEXTEND ON;//打开自动增长
 ALTER DATABASE DATAFILE 'c:\SmartDB01.ora' AUTOEXTEND ON NEXT 200M ;//每次自动增长200m
 
 ALTER DATABASE DATAFILE 'c:\SmartDB01.ora' AUTOEXTEND ON NEXT 200M MAXSIZE 1024M;//每次自动增长200m，数据表最大不超过1G
+
+增加表空间文件
+alter tablespace sysaux add datafile '/arch/sysaux02.dbf’size 2048m autoextend on;
+
 ```
 
 
@@ -866,6 +870,29 @@ kafka.common.InconsistentClusterIdException: The Cluster ID kVSgfurUQFGGpHMTBqBP
 更改
 
 ## Linux
+
+#### 配置多网卡
+
+```perl
+第一种方法:
+ifconfig eth0:1 192.168.5.129 netmask 255.255.255.0
+然后,你用ifconfig,就会发现多了一个ip,但这个ip是暂时的,重启以后就不存在了
+
+第二种方法
+cp /etc/sysconfig/network-scripts/ifcfg-eth0 /etc/sysconfig/network-scripts/ifcfg-eth0:2
+vi /etc/sysconfig/network-scripts/ifcfg-eth0:2
+将DEVICE=eth0  更改为DEVICE=eth0:2
+更改一下ip
+保存退出并重启网络就ok了.这条新加的ip是永久的,只要你不删掉它.
+
+
+在linux下配置多个网卡的方法:
+cp /etc/sysconfig/network-scripts/ifcfg-eth0 /etc/sysconfig/network-scripts/ifcfg-eth1
+vi /etc/sysconfig/network-scripts/ifcfg-eth1
+将DEVICE=eth0  更改为DEVICE=eth1
+更改一下ip 等
+保存退出并重启网络就ok了
+```
 
 #### 去除空白行
 

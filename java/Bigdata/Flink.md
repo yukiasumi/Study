@@ -1772,7 +1772,7 @@ import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
 
 import java.util.Properties;
 
-public class SourceKafkaTest {
+public class SourceKafka {
     public static void main(String[] args) throws Exception {
         StreamExecutionEnvironment env =
                 StreamExecutionEnvironment.getExecutionEnvironment();
@@ -1967,7 +1967,7 @@ import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.neptune.datastreamapi.pojo.Event;
 
-public class TransMapTest {
+public class TransMap {
     public static void main(String[] args) throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(1);
@@ -2015,7 +2015,7 @@ import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.neptune.datastreamapi.pojo.Event;
 
-public class TransformFilterTest {
+public class TransformFilter {
     public static void main(String[] args) throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
         env.setParallelism(1);
@@ -2098,3 +2098,386 @@ public class TransformFlatMap {
 
 #### 5.3.2.1 按键分区![image-20221117221226266](../../images/image-20221117221226266.png)
 
+```java
+package org.neptune.datastreamapi;
+
+import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.datastream.KeyedStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.neptune.datastreamapi.pojo.Event;
+
+public class TransformAggKeyBy {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        DataStreamSource<Event> stream = env.fromElements(
+                new Event("Mary", "./home", 1000L),
+                new Event("Bob", "./cart", 2000L)
+        );
+
+        KeyedStream<Event, String> result = stream.keyBy(new KeySelector<Event, String>() {
+            @Override
+            public String getKey(Event value) throws Exception {
+                return value.user;
+            }
+        });
+
+        result.print();
+
+        stream.keyBy(key->key.user).print("lambda");
+
+        env.execute();
+    }
+}
+
+```
+
+#### 5.3.2.2 简单聚合
+
+* sum()：在输入流上，对指定的字段做叠加求和的操作。
+* min()：在输入流上，对指定的字段求最小值，==其他字段会保留最初第一个数据的值==
+* max()：在输入流上，对指定的字段求最大值，==其他字段会保留最初第一个数据的值==
+* minBy()：与 min()类似，在输入流上针对指定字段求最小值。会返回包含字段最小值的整条数据
+* maxBy()：与 max()类似，在输入流上针对指定字段求最大值。会返回包含字段最大值的整条数据
+
+简单聚合算子返回的是 SingleOutputStreamOperator
+
+先分区、后聚合，从 KeyedStream 又转换成了常规的 DataStream 
+
+一个聚合算子，会为每一个key保存一个聚合的值，在Flink中叫作**状态（state）**。
+
+无界流的状态不会被清除，所以使用聚合算子，应该只用在含有有限个 key 的数据流上。
+
+```java
+package org.neptune.datastreamapi;
+
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+
+public class TransformAggTuple {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        DataStreamSource<Tuple3<String, Integer,Integer>> stream = env.fromElements(
+                Tuple3.of("a", 1,7),
+                Tuple3.of("a", 3,8),
+                Tuple3.of("b", 3,9),
+                Tuple3.of("b", 4,10)
+        );
+        stream.keyBy(r -> r.f0).sum(1).print();
+        stream.keyBy(r -> r.f0).sum("f1").print();
+        stream.keyBy(r -> r.f0).max(1).print();
+        stream.keyBy(r -> r.f0).max("f1").print();
+        stream.keyBy(r -> r.f0).min(1).print();
+        stream.keyBy(r -> r.f0).min("f1").print();
+        stream.keyBy(r -> r.f0).maxBy(1).print();
+        stream.keyBy(r -> r.f0).maxBy("f1").print();
+        stream.keyBy(r -> r.f0).minBy(1).print();
+        stream.keyBy(r -> r.f0).minBy("f1").print();
+        env.execute();
+    }
+}
+```
+
+**数据流的类型是 POJO 类，只能通过字段名称来指定，不能通过位置来指定**
+
+```java
+package org.neptune.datastreamapi;
+
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.neptune.datastreamapi.pojo.Event;
+
+public class TransformAggPojo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        DataStreamSource<Event> stream = env.fromElements(
+                new Event("Mary", "./home", 1000L),
+                new Event("Bob", "./cart", 2000L)
+        );
+
+        // 指定字段名称
+        stream.keyBy(e -> e.user).max("timestamp").print(); 
+        env.execute();
+    }
+}
+```
+
+#### 5.3.2.3 归约聚合
+
+reduce 同简单聚合算子，状态不会清空，建议将reduce 算子作用在一个有限 key 的流上。
+
+```java
+public interface ReduceFunction<T> extends Function, Serializable {
+    T reduce(T value1, T value2) throws Exception;
+}
+```
+
+记录当前所有用户中访问量最大的用户。
+
+```java
+package org.neptune.datastreamapi;
+
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.ReduceFunction;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.neptune.datastreamapi.pojo.Event;
+
+public class TransformAggReduce {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        // 这里的 ClickSource()使用了之前自定义数据源中的 ClickSource()
+        env.addSource(new ClickSource())
+                // 将 Event 数据类型转换成元组类型
+                .map(new MapFunction<Event, Tuple2<String, Long>>() {
+                    @Override
+                    public Tuple2<String, Long> map(Event e) throws Exception {
+                        return Tuple2.of(e.user, 1L);
+                    }
+                })
+                .keyBy(r -> r.f0) // 使用用户名来进行分流
+                .reduce(new ReduceFunction<Tuple2<String, Long>>() {
+                    @Override
+                    public Tuple2<String, Long> reduce(Tuple2<String, Long> value1,
+                                                       Tuple2<String, Long> value2) throws Exception {
+                        // 每到一条数据，用户 pv 的统计值加 1
+                        return Tuple2.of(value1.f0, value1.f1 + value2.f1);
+                    }
+                })
+                .keyBy(data -> "key") // 为每一条数据分配同一个 key，将聚合结果发送到一条流中去
+                .reduce(new ReduceFunction<Tuple2<String, Long>>() {
+                    @Override
+                    public Tuple2<String, Long> reduce(Tuple2<String, Long> value1,
+                                                       Tuple2<String, Long> value2) throws Exception {
+                        // 将累加器更新为当前最大的 pv 统计值，然后向下游发送累加器的值
+                        return value1.f1 > value2.f1 ? value1 : value2;
+                    }
+                })
+                .print();
+        env.execute();
+    }
+}
+```
+
+### 5.3.3 用户自定义函数（UDF）
+
+**富函数类（Rich Function Classes)**
+
+富函数类提供 getRuntimeContext()方法，可以获取到运行时上下文的一些信息：
+
+* 程序执行的并行度
+* 任务名称
+* 状态（state）
+
+Rich Function 有生命周期的概念：
+
+* open()方法，初始化方法，优先于实际工作方法，适用于文件 IO 、数据库连接、配置文件读取等一次性工作
+
+* close()方法，是生命周期中的最后一个调用的方法，一般用来做一些清理工作
+
+* 生命周期方法，对于一个并行子任务来说只会调用一次
+* 实际工作方法，例如 RichMapFunction 中的 map()，在每条数据到来后都会触发一次调用
+
+```java
+package org.neptune.datastreamapi;
+
+import org.apache.flink.api.common.functions.RichMapFunction;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.neptune.datastreamapi.pojo.Event;
+
+public class TransformRichFunction {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        DataStreamSource<Event> stream = env.fromElements(
+                new Event("Mary", "./home", 1000L),
+                new Event("Bob", "./cart", 2000L)
+        );
+
+        stream.map(new MyRichMapper()).setParallelism(2).print();
+        env.execute();
+    }
+
+    private static class MyRichMapper extends RichMapFunction<Event,Integer> {
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            super.open(parameters);
+            //getIndexOfThisSubtask 与并行度有关
+            System.out.println("open....生命周期  "+getRuntimeContext().getIndexOfThisSubtask()+"号任务启动");
+        }
+
+        @Override
+        public Integer map(Event value) throws Exception {
+            return value.url.length();
+        }
+
+        @Override
+        public void close() throws Exception {
+            super.close();
+            System.out.println("close....生命周期  "+getRuntimeContext().getIndexOfThisSubtask()+"号任务启动");
+
+        }
+
+
+    }
+}
+
+```
+
+### 5.3.4 物理分区（Physical Partitioning）
+
+#### 5.3.4.1 随机分区（shuffle）
+
+* 最简单的重分区方式就是直接“洗牌”。
+
+* 通过调用 DataStream 的.shuffle()方法，将数据随机地分配到下游算子的并行任务中去。
+
+
+
+![image-20221118210129117](../../images/image-20221118210129117.png)
+
+#### 5.3.4.2 轮询分区（Round-Robin）
+
+* 发牌，按照先后顺序将数据做依次分发
+
+* 通过调用 DataStream 的.rebalance()方法，就可以实现轮询重分区。
+
+* 使用的是 Round-Robin 负载均衡算法，可以将输入流数据平均分配到下游的并行任务中去。
+
+**注：Round-Robin 算法用在了很多地方，例如 Kafka 和 Nginx。**
+
+![image-20221118212450629](../../images/image-20221118212450629.png)
+
+#### 5.3.4.3 重缩放分区（rescale）
+
+当调用 rescale()方法时，底层也是 Round-Robin算法进行轮询，将数据轮询发送到下游并行任务的一部分中
+
+发牌人如果有多个
+
+*  rebalance 是每个发牌人都面向所有人发牌；
+
+*  rescale是分成小团体，发牌人只给自己团体内的所有人轮流发牌。
+
+![image-20221118212506733](../../images/image-20221118212506733.png)
+
+#### 5.3.4.4 广播（broadcast）
+
+经过广播之后，数据会在不同的分区都保留一份，可能进行重复处理。
+
+可以通过调用 DataStream 的 broadcast()方法，将输入数据复制并发送到下游算子的所有并行任务中去。
+
+![image-20221118213329109](../../images/image-20221118213329109.png)
+
+#### 5.3.4.5 全局分区（global）
+
+全局分区也是一种特殊的分区方式。通过调用.global()方法，**强行让下游任务并行度变成 1**
+
+使用这个操作需要非常谨慎，可能对程序造成很大的压力。
+
+![image-20221118213657878](../../images/image-20221118213657878.png)
+
+#### 5.3.4.6 自定义分区（custom）
+
+* 当Flink提供的所有分区策略都不能满足用户的需求时，可以使用partitionCustom()方法来自定义分区策略。
+* 调用时，方法需要传入两个参数
+  * 第一个是自定义分区器（Partitioner）对象
+  * 第二个是应用分区器的字段。指定方式与keyBy指定key基本一样：
+    * 通过字段名称指定
+    * 通过字段位置索引来指定
+  * 或者第二个参数实现一个KeySelector。
+
+```java
+package org.neptune.datastreamapi;
+
+import org.apache.flink.api.common.functions.Partitioner;
+import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
+import org.neptune.datastreamapi.pojo.Event;
+
+public class TransformPartition {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+        DataStreamSource<Event> stream = env.addSource(new ClickSource());
+
+        //1.随机分区
+        stream.shuffle().print().setParallelism(4);
+
+        //2.轮询分区 前后并行度不同，Flink底层自动调用rebalabce
+        stream.rebalance().print().setParallelism(4);
+        stream.print().setParallelism(4);
+
+        //3.rescale重缩放分区
+        env.addSource(new RichParallelSourceFunction<Integer>() {
+            @Override
+            public void run(SourceContext<Integer> ctx) throws Exception {
+                for (int i = 1; i <= 8; i++) {
+                    //将奇偶数分别发送到 0号和 1号并行分区(并行度设置为2)
+                    if (i % 2 == getRuntimeContext().getIndexOfThisSubtask()) {
+                        ctx.collect(i);
+                    }
+                }
+            }
+
+            @Override
+            public void cancel() {
+
+            }
+        }).setParallelism(2).rescale().print().setParallelism(4);
+
+        //4. 广播
+        stream.broadcast().print().setParallelism(4);
+
+        //5. 全局分区
+        stream.global().print().setParallelism(4);
+
+        //6. 自定义分区
+        env.fromElements(1, 2, 3, 4, 5, 6, 7, 8)
+                .partitionCustom(new Partitioner<Integer>() {
+                    @Override
+                    public int partition(Integer key, int numPartitions) {
+                        return key % 2;
+                    }
+                }, new KeySelector<Integer, Integer>() {
+                    @Override
+                    public Integer getKey(Integer value) throws Exception {
+                        return value;
+                    }
+                }).print().setParallelism(4);
+
+        env.execute();
+    }
+}
+
+```
+
+## 5.4 输出算子（Sink）
+
+Flink 作为数据处理框架，最终还是要把计算处理的结果写入外部存储，为外部应用提供支持
+
+![image-20221118214630083](../../images/image-20221118214630083.png)
+
+https://nightlies.apache.org/flink/flink-docs-release-1.13/docs/connectors/datastream/overview/
+
+Flink对第三方系统连接器
+
+![image-20221118215524672](../../images/image-20221118215524672.png)
+
+第三方系统与Flink连接器
+
+![image-20221118215612792](../../images/image-20221118215612792.png)
+
+除此以外，就需要用户自定义实现 sink 连接器了。
+
+### 5.4.1 输出到文件
