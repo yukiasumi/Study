@@ -297,7 +297,7 @@ public class MethodRefTest {
     }
 
     // 情况三：类 :: 实例方法  (有难度)
-    // Comparator中的int comapre(T t1,T t2)
+    // Comparator中的int compare(T t1,T t2)
     // String中的int t1.compareTo(t2)
     @Test
     public void test5() {
