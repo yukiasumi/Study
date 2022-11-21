@@ -5254,3 +5254,5 @@ ProcessFunction<Integer, Long>() {
 DataStream<String> stringStream = longStream.getSideOutput(outputTag);
 ```
 
+# 8 多流转换
+
