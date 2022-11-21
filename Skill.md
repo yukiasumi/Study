@@ -700,6 +700,32 @@ vim ~/.ssh/authorized_keys
 
 ## java
 
+#### compare
+
+```java
+compare(Object o1, Object o2) {
+	return -1;  //返回负数时参数的顺序就是排的顺序即:o1,o2
+}
+
+compare(Object o1, Object o2) {
+	return 1;  //返回正数时参数的反序就是排的顺序即:o2,o1
+}
+
+/**
+*假设有个person类，有年龄属性age
+*/
+compare(Person p1, Person p2) {
+	return p1.age - p2.age;  
+	//如果p1.age > p2.age 返回正数，排序结果为：p2,p1
+	//如果p1.age < p2.age 返回负数，排序结果为：p1,p2
+	//即：从小到大排序，升序排序
+	//同理，return p2.age - p1.age 为从大到小排序。降序排序。
+}
+
+```
+
+
+
 ### javaweb
 
 web.xml或者WWebServlet注解中一定要写/
