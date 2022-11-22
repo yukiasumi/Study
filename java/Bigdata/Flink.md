@@ -4356,8 +4356,11 @@ stream.keyBy(...)
 
 方法需要传入一个“输出标签”（OutputTag），用来标记分支的迟到数据流。因为保存的就是流中的原始数据，所以OutputTag的类型与流中数据类型相同。
 
+==当前类无法读到当前类的泛型，只能读 super 类的泛型==
+
 ```java
 	DataStream<Event> stream = env.addSource(...);
+	//加 {} 表示 一个继承了 OutputTag 的 匿名类 
 	OutputTag<Event> outputTag = new OutputTag<Event>("late") {};
 	stream.keyBy(...)
  	 .window(TumblingEventTimeWindows.of(Time.hours(1)))
@@ -5255,4 +5258,822 @@ DataStream<String> stringStream = longStream.getSideOutput(outputTag);
 ```
 
 # 8 多流转换
+
+多流转换可以分为“分流”和“合流”两大类。
+
+分流的操作一般是通过侧输出流（side output）来实现
+
+合流的算子比较丰富，根据不同的需求可以调用 union、connect、join 以及 coGroup 等接口进行连接合并操作
+
+## 8.1 分流
+
+将一条数据流拆分成完全独立的两条、甚至多条流。
+
+基于一个DataStream，得到完全平等的多个子 DataStream。
+
+一般定义一些筛选条件，将符合条件的数据拣选出来放到对应的流里。
+
+![image-20221122143023792](../../images/image-20221122143023792.png)
+
+### 8.1.1 简单实现
+
+原始数据流 stream 复制三份，然后对每一份分别做筛选，这明显是不够高效的
+
+算子就把它们都拆分开呢
+
+将收集到的用户行为数据进行一个拆分，根据类型（type）的不同，分为“Mary”的浏览数据、“Bob”的浏览数据
+
+```java
+package org.neptune.SplitStream;
+
+import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.neptune.DataStreamAPI.SourceClick;
+import org.neptune.pojo.Event;
+
+public class SplitStreamByFilter {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        SingleOutputStreamOperator<Event> stream = env.addSource(new SourceClick());
+        // 筛选 Mary 的浏览行为放入 MaryStream 流中
+        DataStream<Event> MaryStream = stream.filter(new FilterFunction<Event>() {
+            @Override
+            public boolean filter(Event value) throws Exception {
+                return value.user.equals("Mary");
+            }
+        });
+        // 筛选 Bob 的购买行为放入 BobStream 流中
+        DataStream<Event> BobStream = stream.filter(new FilterFunction<Event>() {
+            @Override
+            public boolean filter(Event value) throws Exception {
+                return value.user.equals("Bob");
+            }
+        });
+        // 筛选其他人的浏览行为放入 elseStream 流中
+        DataStream<Event> elseStream = stream.filter(new FilterFunction<Event>() {
+            @Override
+            public boolean filter(Event value) throws Exception {
+                return !value.user.equals("Mary") && !value.user.equals("Bob");
+            }
+        });
+        MaryStream.print("Mary pv");
+        BobStream.print("Bob pv");
+        elseStream.print("else pv");
+        env.execute();
+    }
+
+}
+```
+
+### 8.1.2 使用侧输出流
+
+定义了两个侧输出流，分别拣选 Mary 的浏览事件和 Bob 的浏览事件；
+
+由于类型已经确定，可以只保留(用户 id, url, 时间戳)这样一个三元组。
+
+剩余的事件则直接输出到主流
+
+```java
+package org.neptune.SplitStream;
+
+import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.ProcessFunction;
+import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
+import org.neptune.DataStreamAPI.SourceClick;
+import org.neptune.pojo.Event;
+
+public class SplitStreamByOutputTag {
+    // 定义输出标签，侧输出流的数据类型为三元组(user, url, timestamp)
+    private static OutputTag<Tuple3<String, String, Long>> MaryTag = new OutputTag<Tuple3<String, String, Long>>("Mary-pv") {
+    };
+    private static OutputTag<Tuple3<String, String, Long>> BobTag = new OutputTag<Tuple3<String, String, Long>>("Bob-pv") {
+    };
+
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        SingleOutputStreamOperator<Event> stream = env.addSource(new SourceClick());
+        SingleOutputStreamOperator<Event> processedStream =
+                stream.process(new ProcessFunction<Event, Event>() {
+                    @Override
+                    public void processElement(Event value, Context ctx, Collector<Event>
+                            out) throws Exception {
+                        if (value.user.equals("Mary")) {
+                            ctx.output(MaryTag, new Tuple3<>(value.user, value.url,
+                                    value.timestamp));
+                        } else if (value.user.equals("Bob")) {
+                            ctx.output(BobTag, new Tuple3<>(value.user, value.url,
+                                    value.timestamp));
+                        } else {
+                            out.collect(value);
+                        }
+                    }
+                });
+        processedStream.getSideOutput(MaryTag).print("Mary pv");
+        processedStream.getSideOutput(BobTag).print("Bob pv");
+        processedStream.print("else");
+        env.execute();
+    }
+}
+```
+
+## 8.2 基本合流操作
+
+### 8.2.1 联合（Union）
+
+联合操作要求必须流中的**数据类型必须相同**，合并之后的新流会包括所有流中的元素，数据类型不变。
+
+![image-20221122164301923](../../images/image-20221122164301923.png)
+
+基于 DataStream 直接调用.union()方法，传入其他 DataStream 作为参数，就可以实现流的联合了；
+
+得到的依然是一个 DataStream
+
+```java
+stream1.union(stream2, stream3, ...)
+```
+
+用 union 将两条流合并后，用一个 ProcessFunction来进行处理，获取当前的水位线进行输出。
+
+我两条流中每输入一个数据，合并之后的流中都会有数据出现；
+
+而水位线只有在两条流中水位线最小值增大的时候，才会真正向前推进。
+
+```java
+package org.neptune.SplitStream;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.ProcessFunction;
+import org.apache.flink.util.Collector;
+import org.neptune.pojo.Event;
+
+import java.time.Duration;
+
+public class UnionExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+        SingleOutputStreamOperator<Event> stream1 = env.socketTextStream("hadoop102", 7777)
+                .map(data -> {
+                    String[] field = data.split(",");
+                    return new Event(field[0].trim(), field[1].trim(),
+                            Long.valueOf(field[2].trim()));
+                })
+                .assignTimestampsAndWatermarks(WatermarkStrategy.<Event>forBoundedOutOfOrderness(Duration.ofSeconds(2))
+                        .withTimestampAssigner(new SerializableTimestampAssigner<Event>() {
+                            @Override
+                            public long extractTimestamp(Event element, long recordTimestamp) {
+                                return element.timestamp;
+                            }
+                        })
+                );
+        stream1.print("stream1");
+        SingleOutputStreamOperator<Event> stream2 =
+                env.socketTextStream("hadoop103", 7777)
+                        .map(data -> {
+                            String[] field = data.split(",");
+                            return new Event(field[0].trim(), field[1].trim(),
+                                    Long.valueOf(field[2].trim()));
+                        })
+                        .assignTimestampsAndWatermarks(WatermarkStrategy.<Event>forBoundedOutOfOrderness(Duration.ofSeconds(5))
+                                .withTimestampAssigner(new SerializableTimestampAssigner<Event>() {
+                                    @Override
+                                    public long extractTimestamp(Event element, long recordTimestamp) {
+                                        return element.timestamp;
+                                    }
+                                })
+                        );
+        stream2.print("stream2");
+        // 合并两条流
+        stream1.union(stream2)
+                .process(new ProcessFunction<Event, String>() {
+                    @Override
+                    public void processElement(Event value, Context ctx,
+                                               Collector<String> out) throws Exception {
+                        out.collect(" 水 位 线 ： " + ctx.timerService().currentWatermark());
+                    }
+                })
+                .print();
+        env.execute();
+    }
+}
+```
+
+![image-20221122165335291](../../images/image-20221122165335291.png)
+
+![image-20221122165341654](../../images/image-20221122165341654.png)
+
+![image-20221122165347853](../../images/image-20221122165347853.png)
+
+![image-20221122165352592](../../images/image-20221122165352592.png)
+
+### 8.2.2 连接（Connect）
+
+#### 8.2.2.1 连接流（ConnectedStreams）
+
+**允许流的数据类型不同**
+
+两条流可以保持各自的数据类型、处理方式也可以不同，最终会统一到同一个 DataStream 中
+
+![image-20221122165643697](../../images/image-20221122165643697.png)
+
+基于一条 DataStream 调用.connect()方法，传入另外一条 DataStream 作为参数，将两条流连接起来，得到一个 ConnectedStreams；
+
+然后再调用同处理方法得到 DataStream。
+
+```java
+package org.neptune.SplitStream;
+
+import org.apache.flink.streaming.api.datastream.ConnectedStreams;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.co.CoMapFunction;
+
+public class CoMapExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        DataStream<Integer> stream1 = env.fromElements(1, 2, 3);
+        DataStream<Long> stream2 = env.fromElements(1L, 2L, 3L);
+        ConnectedStreams<Integer, Long> connectedStreams = stream1.connect(stream2);
+        SingleOutputStreamOperator<String> result = connectedStreams.map(new CoMapFunction<Integer, Long, String>() {
+
+            @Override
+            public String map1(Integer value) {
+                return "Integer: " + value;
+            }
+
+            @Override
+            public String map2(Long value) {
+                return "Long: " + value;
+            }
+        });
+        result.print();
+        env.execute();
+    }
+}
+```
+
+ConnectedStreams 可以直接调用.keyBy()进行按键分区的操作，得到的还是一个 ConnectedStreams：
+
+```java
+connectedStreams.keyBy(keySelector1, keySelector2);
+```
+
+ConnectedStreams 进行 keyBy 操作：
+
+把两条流中 key 相同的数据放到一起，然后针对来源的流再做各自处理
+
+在合并之前将两条流分别进行 keyBy，得到的 KeyedStream 再进行连接（connect）操作，效果是一样的。
+
+两条流定义的键的类型必须相同，否则会抛出异常。
+
+#### 8.2.2.2 CoProcessFunction
+
+```java
+public abstract class CoProcessFunction<IN1, IN2, OUT> extends AbstractRichFunction {
+...
+public abstract void processElement1(IN1 value, Context ctx, Collector<OUT> out) throws Exception;
+public abstract void processElement2(IN2 value, Context ctx, Collector<OUT> out) throws Exception;
+public void onTimer(long timestamp, OnTimerContext ctx, Collector<OUT> out) throws Exception {}
+public abstract class Context {...}
+...
+}
+```
+
+实现一个实时对账的需求：
+
+app 的支付操作和第三方的支付操作的一个双流 Join。App 的支付事件和第三方的支付事件将会互相等待 5 秒钟，如果等不来对应的支付事件，那么就输出报警信息。
+
+* 声明两个状态变量分别用来保存 App 的支付信息和第三方的支付信息。
+
+* App 的支付信息到达以后，会检查对应的第三方支付信息是否已经先到达（先到达会保存在对应的状态变量中），如果已经到达了，那么对账成功，直接输出对账成功的信息，并将保存第三方支付消息的状态变量清空。
+
+* 如果 App 对应的第三方支付信息没有到来，那么我们会注册一个 5 秒钟之后的定时器，也就是说等待第三方支付事件 5 秒钟。当定时器触发时，检查保存app 支付信息的状态变量是否还在，如果还在，说明对应的第三方支付信息没有到来，输出报警信息。
+
+```java
+package org.neptune.SplitStream;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.api.java.tuple.Tuple4;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.co.CoProcessFunction;
+import org.apache.flink.util.Collector;
+
+// 实时对账
+public class BillCheckExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        // 来自 app 的支付日志
+        SingleOutputStreamOperator<Tuple3<String, String, Long>> appStream =
+                env.fromElements(
+                        Tuple3.of("order-1", "app", 1000L),
+                        Tuple3.of("order-2", "app", 2000L)
+                ).assignTimestampsAndWatermarks(WatermarkStrategy.<Tuple3<String,
+                                String, Long>>forMonotonousTimestamps()
+                        .withTimestampAssigner(new SerializableTimestampAssigner<Tuple3<String, String, Long>>() {
+                            @Override
+                            public long extractTimestamp(Tuple3<String, String, Long>
+                                                                 element, long recordTimestamp) {
+                                return element.f2;
+                            }
+                        })
+                );
+        // 来自第三方支付平台的支付日志
+        SingleOutputStreamOperator<Tuple4<String, String, String, Long>>
+                thirdpartStream = env.fromElements(
+                Tuple4.of("order-1", "third-party", "success", 3000L),
+                Tuple4.of("order-3", "third-party", "success", 4000L)
+        ).assignTimestampsAndWatermarks(WatermarkStrategy.<Tuple4<String,
+                        String, String, Long>>forMonotonousTimestamps()
+                .withTimestampAssigner(new SerializableTimestampAssigner<Tuple4<String, String, String, Long>>() {
+                    @Override
+                    public long extractTimestamp(Tuple4<String, String, String, Long>
+                                                         element, long recordTimestamp) {
+                        return element.f3;
+                    }
+                })
+        );
+        // 检测同一支付单在两条流中是否匹配，不匹配就报警
+        appStream.connect(thirdpartStream)
+                .keyBy(data -> data.f0, data -> data.f0)
+                .process(new OrderMatchResult())
+                .print();
+        env.execute();
+    }
+
+    // 自定义实现 CoProcessFunction
+    public static class OrderMatchResult extends CoProcessFunction<Tuple3<String,
+            String, Long>, Tuple4<String, String, String, Long>, String> {
+        // 定义状态变量，用来保存已经到达的事件
+        private ValueState<Tuple3<String, String, Long>> appEventState;
+        private ValueState<Tuple4<String, String, String, Long>> thirdPartyEventState;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            appEventState = getRuntimeContext().getState(
+                    new ValueStateDescriptor<Tuple3<String, String, Long>>
+                            ("app-event", Types.TUPLE(Types.STRING, Types.STRING, Types.LONG))
+            );
+            thirdPartyEventState = getRuntimeContext().getState(
+                    new ValueStateDescriptor<Tuple4<String, String, String, Long>>
+                            ("thirdparty-event", Types.TUPLE(Types.STRING, Types.STRING,
+                            Types.STRING, Types.LONG))
+            );
+        }
+
+        @Override
+        public void processElement1(Tuple3<String, String, Long> value, Context ctx,
+                                    Collector<String> out) throws Exception {
+            // 看另一条流中事件是否来过
+            if (thirdPartyEventState.value() != null) {
+                out.collect(" 对 账 成 功 ： " + value + " " +
+                        thirdPartyEventState.value());
+                // 清空状态
+                thirdPartyEventState.clear();
+            } else {
+                // 更新状态
+                appEventState.update(value);
+                // 注册一个 5 秒后的定时器，开始等待另一条流的事件
+                ctx.timerService().registerEventTimeTimer(value.f2 + 5000L);
+            }
+        }
+
+        @Override
+        public void processElement2(Tuple4<String, String, String, Long> value,
+                                    Context ctx, Collector<String> out) throws Exception {
+            if (appEventState.value() != null) {
+                out.collect("对账成功：" + appEventState.value() + " " + value);
+                // 清空状态
+                appEventState.clear();
+            } else {
+                // 更新状态
+                thirdPartyEventState.update(value);
+                // 注册一个 5 秒后的定时器，开始等待另一条流的事件
+                ctx.timerService().registerEventTimeTimer(value.f3 + 5000L);
+            }
+        }
+
+        @Override
+        public void onTimer(long timestamp, OnTimerContext ctx, Collector<String>
+                out) throws Exception {
+            // 定时器触发，判断状态，如果某个状态不为空，说明另一条流中事件没来
+            if (appEventState.value() != null) {
+                out.collect("对账失败：" + appEventState.value() + " " + "第三方支付 平台信息未到");
+            }
+            if (thirdPartyEventState.value() != null) {
+                out.collect("对账失败：" + thirdPartyEventState.value() + " " + "app 信息未到");
+            }
+            appEventState.clear();
+            thirdPartyEventState.clear();
+        }
+    }
+}
+```
+
+#### 8.2.2.3 广播连接流（BroadcastConnectedStream）
+
+DataStream 调用.connect()方法时，传入“广播流”（BroadcastStream）参数
+
+```java
+MapStateDescriptor<String, Rule> ruleStateDescriptor = new MapStateDescriptor<>(...);
+
+BroadcastStream<Rule> ruleBroadcastStream = ruleStream.broadcast(ruleStateDescriptor);
+
+DataStream<String> output = stream
+.connect(ruleBroadcastStream)
+.process( new BroadcastProcessFunction<>() {...} );
+```
+
+BroadcastProcessFunction是一个抽象类，需要实现两个方法，针对合并的两条流中元素分别定义处理操作。
+
+一条流是正常处理数据，而另一条流则是要用新规则来更新广播状态
+
+```java
+public abstract class BroadcastProcessFunction<IN1, IN2, OUT> extends BaseBroadcastProcessFunction {
+...
+ public abstract void processElement(IN1 value, ReadOnlyContext ctx, Collector<OUT> out) throws Exception;
+ public abstract void processBroadcastElement(IN2 value, Context ctx, Collector<OUT> out) throws Exception;
+...
+}
+```
+
+## 8.3 基于时间的合流——双流联结（Join）
+
+### 8.3.1 窗口联结（Window Join）
+
+可以定义时间窗口，并将两条流中共享一个公共键（key）的数据放在窗口中进行配对处理。
+
+#### 8.3.1.1 窗口联结的调用
+
+* 首先需要调用 DataStream 的.join()方法来合并两条流，得到一个 JoinedStreams；
+
+* 接着通过.where()和.equalTo()方法指定两条流中联结的 key；
+* 然后通过.window()开窗口，并调用.apply()传入联结窗口函数进行处理计算。
+* 在.window()和.apply()之间也可以调用可选 API 去做一些自定义，比如用.trigger()定义触发器，用.allowedLateness()定义允许延迟时间
+
+```java
+stream1.join(stream2)
+ .where(<KeySelector>) //指定第一条流中的 key
+ .equalTo(<KeySelector>) //指定第二条流中的 key
+ .window(<WindowAssigner>) //传入窗口分配器，
+ .apply(<JoinFunction>)//实现了一个特殊的窗口函数
+```
+
+JoinFunciton 不是真正的“窗口函数”，它只是定义了窗口函数在调用时对匹配数据的具体处理逻辑
+
+JoinFunction 是一个函数类接口，使用时需要实现内部的.join()方法。
+
+join()方法有两个参数，分别表示两条流中成对匹配的数据
+
+```java
+public interface JoinFunction<IN1, IN2, OUT> extends Function, Serializable {
+ OUT join(IN1 first, IN2 second) throws Exception;
+}
+```
+
+#### 8.3.1.2 窗口联结的处理流程
+
+1. 两条流的数据到来之后，首先会按照 key 分组、进入对应的窗口中存储
+
+2. 当到达窗口结束时间时，算子会先统计出窗口内两条流的数据的所有组合，对两条流中的数据做一个笛卡尔积
+
+3. 然后进行遍历，把每一对匹配的数据，作为参数(first，second)传入 JoinFunction 的.join()方法进行计算处理
+
+4. 窗口中每有一对数据成功联结匹配，JoinFunction 的.join()方法就会被调用一次，并输出一个结果。
+
+![image-20221122214745893](../../images/image-20221122214745893.png)
+
+#### 8.3.1.3 窗口联结实例
+
+统计用户不同行为之间的转化，按照用户 ID 进行分组后再合并，以固定时间周期（此处5秒）来统计
+
+```java
+package org.neptune.SplitStream;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.JoinFunction;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.time.Time;
+
+// 基于窗口的 join
+public class WindowJoinExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        DataStream<Tuple2<String, Long>> stream1 = env
+                .fromElements(
+                        Tuple2.of("a", 1000L),
+                        Tuple2.of("b", 1000L),
+                        Tuple2.of("a", 2000L),
+                        Tuple2.of("b", 2000L)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<Tuple2<String, Long>>forMonotonousTimestamps()
+                                .withTimestampAssigner(
+                                        new SerializableTimestampAssigner<Tuple2<String, Long>>() {
+                                            @Override
+                                            public long extractTimestamp(Tuple2<String,
+                                                    Long> stringLongTuple2, long l) {
+                                                return stringLongTuple2.f1;
+                                            }
+                                        }
+                                )
+                );
+        DataStream<Tuple2<String, Long>> stream2 = env
+                .fromElements(
+                        Tuple2.of("a", 3000L),
+                        Tuple2.of("b", 3000L),
+                        Tuple2.of("a", 4000L),
+                        Tuple2.of("b", 4000L)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<Tuple2<String, Long>>forMonotonousTimestamps()
+                                .withTimestampAssigner(
+                                        new SerializableTimestampAssigner<Tuple2<String, Long>>() {
+                                            @Override
+                                            public long extractTimestamp(Tuple2<String,
+                                                    Long> stringLongTuple2, long l) {
+                                                return stringLongTuple2.f1;
+                                            }
+                                        }
+                                )
+                );
+        stream1.join(stream2)
+                .where(r -> r.f0)
+                .equalTo(r -> r.f0)
+                .window(TumblingEventTimeWindows.of(Time.seconds(5)))
+                .apply(new JoinFunction<Tuple2<String, Long>, Tuple2<String, Long>,
+                        String>() {
+                    @Override
+                    public String join(Tuple2<String, Long> left, Tuple2<String,
+                            Long> right) throws Exception {
+                        return left + "=>" + right;
+                    }
+                })
+                .print();
+        env.execute();
+    }
+}
+```
+
+### 8.3.2 间隔联结（Interval Join）
+
+#### 8.3.2.1 间隔联结的原理
+
+给定两个时间点，分别叫作间隔的“上界”（upperBound）和“下界”（lowerBound）
+
+对于一条流 A中的任意一个数据元素 a，就可以开辟一段时间间隔，作为可以匹配另一条流数据的“窗口”范围：
+
+[a.timestamp + lowerBound, a.timestamp + upperBound]
+
+对于另一条流B中的数据元素 b，如果它的时间戳落在了这个区间范围内，a 和 b 就可以成功配对
+
+所以匹配的条件为：
+
+a.timestamp + lowerBound <= b.timestamp <= a.timestamp + upperBound
+
+做间隔联结的两条流 A 和 B，也必须基于相同的 key
+
+流 B 中的数据可以不只在一个区间内被匹配
+
+下界 lowerBound应该小于等于上界 upperBound，两者都可正可负；间隔联结目前只支持事件时间语义。
+
+![image-20221122220246965](../../images/image-20221122220246965.png)
+
+#### 8.3.2.2 间隔联结的调用
+
+```java
+stream1
+ .keyBy(<KeySelector>)
+ .intervalJoin(stream2.keyBy(<KeySelector>))//两者的 key 类型应该一致
+ .between(Time.milliseconds(-2), Time.milliseconds(1)) //指定间隔的上下界
+ .process (new ProcessJoinFunction<Integer, Integer, String(){
+ @Override
+ public void processElement(Integer left, Integer right, Context ctx, Collector<String> out) {
+ out.collect(left + "," + right);//left 指第一条流中的数据，right 指第二条流中的数据
+ }
+ });
+```
+
+#### 8.3.2.3 间隔联结实例
+
+有两条流，一条是下订单的流，一条是浏览数据的流。
+
+针对同一个用户。对下订单的事件和最近十分钟的浏览数据进行一个联结查询。
+
+```java
+package org.neptune.SplitStream;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.co.ProcessJoinFunction;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.util.Collector;
+import org.neptune.pojo.Event;
+
+// 基于间隔的 join
+public class IntervalJoinExample {
+
+    public static void main(String[] args) throws Exception {
+
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        SingleOutputStreamOperator<Tuple3<String, String, Long>> orderStream =
+                env.fromElements(
+                        Tuple3.of("Mary", "order-1", 5000L),
+                        Tuple3.of("Alice", "order-2", 5000L),
+                        Tuple3.of("Bob", "order-3", 20000L),
+                        Tuple3.of("Alice", "order-4", 20000L),
+                        Tuple3.of("Cary", "order-5", 51000L)
+                ).assignTimestampsAndWatermarks(WatermarkStrategy.<Tuple3<String,
+                                String, Long>>forMonotonousTimestamps()
+                        .withTimestampAssigner(new SerializableTimestampAssigner<Tuple3<String, String, Long>>() {
+                            @Override
+                            public long extractTimestamp(Tuple3<String, String, Long>
+                                                                 element, long recordTimestamp) {
+                                return element.f2;
+                            }
+                        })
+                );
+        SingleOutputStreamOperator<Event> clickStream = env.fromElements(
+                new Event("Bob", "./cart", 2000L),
+                new Event("Alice", "./prod?id=100", 3000L),
+                new Event("Alice", "./prod?id=200", 3500L),
+                new Event("Bob", "./prod?id=2", 2500L),
+                new Event("Alice", "./prod?id=300", 36000L),
+                new Event("Bob", "./home", 30000L),
+                new Event("Bob", "./prod?id=1", 23000L),
+                new Event("Bob", "./prod?id=3", 33000L)
+        ).assignTimestampsAndWatermarks(WatermarkStrategy.<Event>forMonotonousTimestamps()
+                .withTimestampAssigner(new SerializableTimestampAssigner<Event>() {
+                    @Override
+                    public long extractTimestamp(Event element, long recordTimestamp) {
+                        return element.timestamp;
+                    }
+                })
+        );
+        orderStream.keyBy(data -> data.f0)
+                .intervalJoin(clickStream.keyBy(data -> data.user))
+                .between(Time.seconds(-5), Time.seconds(10))
+                .process(new ProcessJoinFunction<Tuple3<String, String, Long>,
+                        Event, String>() {
+                    @Override
+                    public void processElement(Tuple3<String, String, Long> left,
+                                               Event right, Context ctx, Collector<String> out) throws Exception {
+                        out.collect(right + " => " + left);
+                    }
+                })
+                .print();
+        env.execute();
+    }
+}
+```
+
+### 8.3.3 窗口同组联结（Window CoGroup）
+
+```java
+stream1.coGroup(stream2)
+ .where(<KeySelector>)
+ .equalTo(<KeySelector>)
+ .window(TumblingEventTimeWindows.of(Time.hours(1)))
+ .apply(<CoGroupFunction>)
+```
+
+直接把收集到的所有数据一次性传入，**要怎样配对完全是自定义的**
+
+比 join 更加通用，不仅可以实现类似 SQL 中的“内连接”（inner join）、左外连接（left outer join）、右外连接（right outer join）和全外连接（full outer join）。
+
+窗口 join 的底层，也是通过 coGroup 来实现的。
+
+```java
+public interface CoGroupFunction<IN1, IN2, O> extends Function, Serializable {
+ void coGroup(Iterable<IN1> first, Iterable<IN2> second, Collector<O> out) throws Exception;
+}
+```
+
+```java
+package org.neptune.SplitStream;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.CoGroupFunction;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.util.Collector;
+
+// 基于窗口的 join
+public class CoGroupExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        DataStream<Tuple2<String, Long>> stream1 = env
+                .fromElements(
+                        Tuple2.of("a", 1000L),
+                        Tuple2.of("b", 1000L),
+                        Tuple2.of("a", 2000L),
+                        Tuple2.of("b", 2000L)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<Tuple2<String, Long>>forMonotonousTimestamps()
+                                .withTimestampAssigner(
+                                        new SerializableTimestampAssigner<Tuple2<String, Long>>() {
+                                            @Override
+                                            public long extractTimestamp(Tuple2<String,
+                                                    Long> stringLongTuple2, long l) {
+                                                return stringLongTuple2.f1;
+                                            }
+                                        }
+                                )
+                );
+        DataStream<Tuple2<String, Long>> stream2 = env
+                .fromElements(
+                        Tuple2.of("a", 3000L),
+                        Tuple2.of("b", 3000L),
+                        Tuple2.of("a", 4000L),
+                        Tuple2.of("b", 4000L)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<Tuple2<String, Long>>forMonotonousTimestamps()
+                                .withTimestampAssigner(
+                                        new SerializableTimestampAssigner<Tuple2<String, Long>>() {
+                                            @Override
+                                            public long extractTimestamp(Tuple2<String,
+                                                    Long> stringLongTuple2, long l) {
+                                                return stringLongTuple2.f1;
+                                            }
+                                        }
+                                )
+                );
+        stream1.coGroup(stream2)
+                .where(r -> r.f0)
+                .equalTo(r -> r.f0)
+                .window(TumblingEventTimeWindows.of(Time.seconds(5)))
+                .apply(new CoGroupFunction<Tuple2<String, Long>, Tuple2<String, Long>, String>() {
+                    @Override
+                    public void coGroup(Iterable<Tuple2<String, Long>> iter1,
+                                        Iterable<Tuple2<String, Long>> iter2, Collector<String> collector)
+                            throws Exception {
+                        collector.collect(iter1 + "=>" + iter2);
+                    }
+                })
+                .print();
+        env.execute();
+    }
+}
+```
+
+## 8.4 本章总结
+
+分流操作可以通过处理函数的侧输出流（side output）很容易地实现；而合流则提供不同层级的各种 API。
+
+* union 可以对多条流进行合并，数据类型必须一致；
+
+* connect 只能连接两条流，数据类型可以不同。
+
+* connect 提供了最底层的处理函数（process function）接口，自定义的合流操作。
+
+联结（join）操作，基于某个时间段的双流合并，是需求特化之后的高层级 API：
+
+* 窗口联结（window join）：基于时间窗口的操作
+* 间隔联结（interval join）：基于每个数据元素截取对应的一个时间段来做联结，处理操作需调用.process()
+* 窗口同组联结（window coGroup）：基于时间窗口的操作
+
+# 9 状态编程
+
+
 
