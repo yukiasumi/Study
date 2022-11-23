@@ -7257,3 +7257,392 @@ Flink 发行版中默认就包含了 RocksDB，只要代码中没有使用 Rocks
 
 即使我们在 flink-conf.yaml 配置文件中设定了state.backend 为 rocksdb，也可以直接正常运行，并且使用 RocksDB 作为状态后端。
 
+# 10 容错机制
+
+## 10.1 检查点（Checkpoint）
+
+检查点是 Flink 容错机制的核心，即游戏存档
+
+### 10.1.1 检查点的保存
+
+1. 周期性的触发保存
+
+2. 保存的时间点
+
+当所有任务都恰好处理完一个相同的输入数据的时候，将它们的状态保存下来
+
+一个数据要么被所有任务完整地处理完，状态得到了保存；
+
+要么就是没处理完，状态全部没保存：相当于构建了一个“事务”（transaction）
+
+3. 保存的具体流程
+
+```java
+SingleOutputStreamOperator<Tuple2<String, Long>> wordCountStream = 
+env
+	.addSource(...)
+	.map(word -> Tuple2.of(word, 1L))
+	.returns(Types.TUPLE(Types.STRING, Types.LONG));
+	.keyBy(t -> t.f0);
+	.sum(1);
+```
+
+* 源（Source）任务从外部数据源读取数据，并记录当前的偏移量，作为算子状态（Operator State）保存下来
+
+* 然后将数据发给下游的 Map 任务，它会将一个单词转换成(word, count)二元组，初始 count 都是 1，也就是(“hello”, 1)、(“world”, 1)这样的形式，这是一个无状态的算子任务
+
+* 进而以 word 作为键（key）进行分区，调用.sum()方法就可以对 count 值进行求和统计了
+
+* Sum 算子会把当前求和的结果作为按键分区状态（Keyed State）保存下来。最后得到的就是当前单词的频次统计(word, count)
+
+![image-20221123205357112](../../images/image-20221123205357112.png)
+
+当需要保存检查点（checkpoint）时，就是在所有任务处理完同一条数据后，对状态做个快照保存下来。
+
+例如上图，已经处理了 3 条数据：“hello”“world”“hello”， Source 算子的偏移量为 3；
+
+后面的 Sum 算子处理完第三条数据“hello”之后，此时已经有 2 个“hello”和 1 个“world”，所以对应的状态为“hello”-> 2，“world”-> 1（这里 KeyedState底层会以 key-value 形式存储）。
+
+此时所有任务都已经处理完了前三个数据，所以我们可以把当前的状态保存成一个检查点，写入外部存储中。至于具体保存到哪里，这是由状态后端的配置项 “ 检 查 点 存 储 ”（ CheckpointStorage ）来决定的，可以有作业管理器的堆内存（JobManagerCheckpointStorage）和文件系统（FileSystemCheckpointStorage）两种选择。
+
+一般情况下，会将检查点写入持久化的分布式文件系统。
+
+### 10.1.2 从检查点恢复状态
+
+![image-20221123205811709](../../images/image-20221123205811709.png)
+
+这里 Source 任务已经处理完毕，所以偏移量为 5；Map 任务也处理完成了。而 Sum 任务在处理中发生了故障，此时状态并未保存。
+
+接下来就需要从检查点来恢复状态了。具体的步骤为：
+
+1. 重启应用
+
+   遇到故障之后，第一步当然就是重启。我们将应用重新启动后，所有任务的状态会清空
+
+   ![image-20221123205853403](../../images/image-20221123205853403.png)
+
+   2. 读取检查点，重置状态
+
+      找到最近一次保存的检查点，从中读出每个算子任务状态的快照，分别填充到对应的状态中
+
+      即：刚好处理完第三个数据的时候
+
+   ![image-20221123205916922](../../images/image-20221123205916922.png)
+
+   3. 重放数据
+
+      从保存检查点后开始重新读取数据，可以通过 Source 任务向外部数据源重新提交偏移量（offset）实现
+
+   ![image-20221123210127431](../../images/image-20221123210127431.png)
+
+4. 继续处理数据
+
+   重放第 4、5 个数据，然后继续读取后面的数据
+
+![image-20221123210240592](../../images/image-20221123210240592.png)
+
+实现了“精确一次”（exactly-once）的状态一致性保证
+
+想要正确地从检查点中读取并恢复状态，必须知道每个算子任务状态的类型和它们的先后顺序（拓扑结构）；
+
+因此为了可以从之前的检查点中恢复状态，我们在改动程序、修复 bug 时要保证状态的拓扑顺序和类型不变。
+
+状态的拓扑结构在 JobManager 上可以由 JobGraph 分析得到，而检查点保存的定期触发也是由 JobManager 控制的；所以故障恢复的过程需要 JobManager 的参与
+
+### 10.1.3 检查点算法
+
+在不暂停整体流处理的前提下，将状态备份保存到检查点
+
+#### 10.1.3.1 检查点分界线（Barrier）
+
+**在不暂停流处理的前提下，让每个任务“认出”触发检查点保存的那个数据。**
+
+==插入一条特殊数据，经过每个算子的时候触发一次快照==
+
+借鉴水位线（watermark）的设计，在数据流中插入一个特殊的数据结构，用来表示触发检查点保存的时间点。
+
+把一条流上的数据按照不同的检查点分隔开，叫作检查点的“分界线”（Checkpoint Barrier）。
+
+* 分界线之前到来的数据导致的状态更改，都会被包含在当前分界线所表示的检查点中；
+
+* 分界线之后的数据导致的状态更改，则会被包含在之后的检查点中。
+
+检查点分界线是一条特殊的数据，由 Source 算子注入到常规的数据流中，它的位置是限定好的，不能超过其他数据，也不能被后面的数据超过。检查点分界线中带有一个检查点 ID，这是当前要保存的检查点的唯一标识
+
+![image-20221123210834157](../../images/image-20221123210834157.png)
+
+在 JobManager 中有一个“检查点协调器”（checkpoint coordinator），专门用来协调处理检查点的相关工作。
+
+检查点协调器会定期向 TaskManager 发出指令，要求保存检查点（带着检查点 ID）；
+
+TaskManager 会让所有的 Source 任务把自己的偏移量（算子状态）保存起来，并将带有检查点 ID 的分界线（barrier）插入到当前的数据流中，然后像正常的数据一样像下游传递；
+
+之后 Source 任务就可以继续读入新的数据了。
+
+**每个算子任务只要处理到这个 barrier，就把当前的状态进行快照；在收到 barrier 之前，还是正常地处理之前的数据，完全不受影响。**
+
+#### 10.1.3.2 分布式快照算法
+
+![image-20221123214134927](../../images/image-20221123214134927.png)
+
+检查点保存的算法。具体过程如下：
+
+1. JobManager 发送指令，触发检查点的保存，Source 任务保存状态，插入分界线
+
+   * JobManager 会周期性地向每个 TaskManager 发送一条带有新检查点 ID 的消息，来启动检查点。
+   * 收到指令后，TaskManger 会在所有 Source 任务中插入一个分界线（barrier），并将偏移量保存到远程的持久化存储中。
+   * 并行的 Source 任务保存的状态为 3 和 1，表示当前的 1 号检查点应该包含：第一条流中截至第三个数据、第二条流中截至第一个数据的所有状态更改。
+
+   ![image-20221123214359068](../../images/image-20221123214359068.png)
+
+2. 状态快照保存完成，分界线向下游传递
+
+   * 状态存入持久化存储之后，会返回通知给 Source 任务；Source 任务就会向 JobManager 确认检查点完成，然后像数据一样把 barrier 向下游任务传递
+
+   ![image-20221123214626285](../../images/image-20221123214626285.png)
+
+3. 向下游多个并行子任务广播分界线，执行分界线对齐
+
+   * Map 任务没有状态，所以直接将 barrier 继续向下游传递。
+   * 由于进行了 keyBy 分区，所以需要将 barrier 广播到下游并行的两个 Sum 任务。
+   * Sum 任务可能收到来自上游两个并行 Map 任务的 barrier，所以需要执行“分界线对齐”操作。
+   * 此时分区二的Sum 2收到了来自上游两个 Map 任务的 barrier（offset=3），说明第一条流第三个数据、第二条流第一个数据都已经处理完，可以进行状态的保存了；
+   * 而分区一的Sum 1的barrier（offset=2），所以这时需要等待分界线对齐。在等待的过程中，如果分界线尚未到达的分区一任务Map 1 又传来了数据(hello, 1)，说明这是需要保存到检查点的，Sum 任务应该正常继续处理数据，状态更新为 （offset=3）；而如果分界线已经到达的分区任务 Map 2 又传来数据，这已经是下一个检查点要保存的内容了，就不应立即处理，而是要缓存起来、等到状态保存之后再做处理。
+
+   ![image-20221123214816212](../../images/image-20221123214816212.png)
+
+4. 分界线对齐后，保存状态到持久化存储
+
+   * 各个分区的分界线都对齐后，就可以对当前状态做快照，保存到持久化存储了。
+   * 存储完成之后，同样将 barrier 向下游继续传递，并通知 JobManager 保存完毕
+   * 每个任务保存自己的状态都是相对独立的，互不影响。
+   * 当Sum 将当前状态保存完毕时，Source 1 （offset=5）任务已经读取到第一条流的第五个数据了
+
+   ![image-20221123215517153](../../images/image-20221123215517153.png)
+
+5. 先处理缓存数据，然后正常继续处理
+
+   * 完成检查点保存之后，任务就可以继续正常处理数据了。
+   * 如果有等待分界线对齐时缓存的数据，需要先做处理；然后再按照顺序依次处理新到的数据。
+
+6. ==当 JobManager 收到所有任务成功保存状态的信息，就可以确认当前检查点成功保存。之后遇到故障就可以从这里恢复了==
+
+Flink 1.11 之后提供了不对齐的检查点保存方式，可以将未处理的缓冲数据（in-flight data）也保存进检查点。这样，当我们遇到一个分区 barrier 时就不需等待对齐，而是可以直接启动状态的保存了。
+
+### 10.1.4 检查点配置
+
+默认情况下，Flink 程序是禁用检查点的
+
+#### 10.1.4.1 启用检查点
+
+```java
+StreamExecutionEnvironment env = 
+StreamExecutionEnvironment.getExecutionEnvironment();
+// 每隔 1 秒启动一次检查点保存
+env.enableCheckpointing(1000);//不传参数默认为 500 毫秒，这种方式已经被弃用。
+```
+
+检查点的间隔时间是对处理性能和故障恢复速度的一个权衡。
+
+* 希望对性能的影响更小，可以调大间隔时间；
+
+* 希望故障重启后迅速赶上实时的数据处理，就需要将间隔时间设小一些。
+
+#### 10.1.4.2 检查点存储（Checkpoint Storage）
+
+默认情况下，检查点存储在 JobManager 的堆（heap）内存中。
+
+可以通过调用检查点配置的 .setCheckpointStorage() 来 配 置 ， 需要传入一个CheckpointStorage 的实现类
+
+Flink 主要提供了两种 CheckpointStorage：
+
+* 作业管理器的堆内存JobManagerCheckpointStorage）
+* 文件系统（FileSystemCheckpointStorage）
+
+```java
+// 配置存储检查点到 JobManager 堆内存
+env.getCheckpointConfig().setCheckpointStorage(new JobManagerCheckpointStorage());
+// 配置存储检查点到文件系统
+env.getCheckpointConfig().setCheckpointStorage(
+    new FileSystemCheckpointStorage("hdfs://namenode:40010/flink/checkpoints"));
+```
+
+对于实际生产应用，一般会将 CheckpointStorage 配置为高可用的分布式文件系统（HDFS，S3 等）。
+
+#### 10.1.4.3 其他高级配置
+
+* 检查点模式（CheckpointingMode）
+设置检查点一致性的保证级别，有“精确一次”（exactly-once）和“至少一次”（at-least-once）两个选项。默认级别为 exactly-once，而对于大多数低延迟的流处理程序，at-least-once 就够用了，而且处理效率会更高。
+* 超时时间（checkpointTimeout）
+用于指定检查点保存的超时时间，超时没完成就会被丢弃掉。传入一个长整型毫秒数作为参数，表示超时时间。
+* 最小间隔时间（minPauseBetweenCheckpoints）
+用于指定在上一个检查点完成之后，检查点协调器（checkpoint coordinator）最快等多久可以出发保存下一个检查点的指令。这就意味着即使已经达到了周期触发的时间点，只要距离上一个检查点完成的间隔不够，就依然不能开启下一次检查点的保存。这就为正常处理数据留下了充足的间隙。当指定这个参数时，maxConcurrentCheckpoints 的值强制为 1。
+* 最大并发检查点数量（maxConcurrentCheckpoints）
+用于指定运行中的检查点最多可以有多少个。由于每个任务的处理进度不同，完全可能出现后面的任务还没完成前一个检查点的保存、前面任务已经开始保存下一个检查点了。这个参数就是限制同时进行的最大数量。
+如果前面设置了 minPauseBetweenCheckpoints， maxConcurrentCheckpoints 这个参数就不起作用了。
+* 开启外部持久化存储（enableExternalizedCheckpoints）
+用于开启检查点的外部持久化，而且默认在作业失败的时候不会自动清理，如果想释放空间需要自己手工清理。里面传入的参数 ExternalizedCheckpointCleanup 指定了当作业取消的时候外部的检查点该如何清理。
+* DELETE_ON_CANCELLATION：在作业取消的时候会自动删除外部检查点，但是如果是作业失败退出，则会保留检查点。
+* RETAIN_ON_CANCELLATION：作业取消的时候也会保留外部检查点。
+* 检查点异常时是否让整个任务失败（failOnCheckpointingErrors）
+用于指定在检查点发生异常的时候，是否应该让任务直接失败退出。默认为 true，如果设置为 false，则任务会丢弃掉检查点然后继续运行。
+* 不对齐检查点（enableUnalignedCheckpoints）
+不再执行检查点的分界线对齐操作，启用之后可以大大减少产生背压时的检查点保存时间。这个设置要求检查点模式（CheckpointingMode）必须为 exctly-once，并且并发的检查点个数为 1。
+
+```java
+StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+// 启用检查点，间隔时间 1 秒
+env.enableCheckpointing(1000);
+CheckpointConfig checkpointConfig = env.getCheckpointConfig();
+// 设置精确一次模式
+checkpointConfig.setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
+// 最小间隔时间 500 毫秒
+checkpointConfig.setMinPauseBetweenCheckpoints(500);
+// 超时时间 1 分钟
+checkpointConfig.setCheckpointTimeout(60000);
+// 同时只能有一个检查点
+checkpointConfig.setMaxConcurrentCheckpoints(1);
+// 开启检查点的外部持久化保存，作业取消后依然保留
+checkpointConfig.enableExternalizedCheckpoints(
+ ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
+// 启用不对齐的检查点保存方式
+checkpointConfig.enableUnalignedCheckpoints();
+// 设置检查点存储，可以直接传入一个 String，指定文件系统的路径
+checkpointConfig.setCheckpointStorage("hdfs://my/checkpoint/dir")
+```
+
+### 10.1.5 保存点（Savepoint）
+
+原理和算法与检查点完全相同，只是多了一些额外的元数据
+
+保存点中的状态快照，是以算子 ID 和状态名称组织起来的，相当于一个键值对。
+
+从保存点启动应用程序时，Flink 会将保存点的状态数据重新分配给相应的算子任务。
+
+#### 10.1.5.1 保存点的用途
+
+* 检查点是由 Flink 自动管理的，定期创建，“自动存盘”；
+
+* 保存点不会自动创建，必须由用户明确地手动触发保存操作，“手动存盘”。
+
+* 检查点主要用来做故障恢复，是容错机制的核心；
+
+* 保存点则更加灵活，可以用来做有计划的手动备份和恢复。
+
+我们可以在需要的时候创建一个保存点，然后停止应用，做一些处理调整之后再从保存点重启。
+
+适用的具体场景有：
+
+* 版本管理和归档存储
+  对重要的节点进行手动备份，设置为某一版本，归档（archive）存储应用程序的状态。
+
+*  更新 Flink 版本
+目前 Flink 的底层架构已经非常稳定，所以当 Flink 版本升级时，程序本身一般是兼容的。这时不需要重新执行所有的计算，只要创建一个保存点，停掉应用、升级 Flink 后，从保存点重启就可以继续处理了。
+
+* 更新应用程序
+
+  * 不仅可以在应用程序不变的时候，更新 Flink 版本；还可以直接更新应用程序。
+
+  * 前提是程序必须是兼容的，也就是说更改之后的程序，状态的拓扑结构和数据类型都是不变的，这样才能正常从之前的保存点去加载。
+  * 这个功能非常有用。我们可以及时修复应用程序中的逻辑 bug，更新之后接着继续处理；
+  * 也可以用于有不同业务逻辑的场景，比如 A/B 测试等等。
+
+*  调整并行度
+如果应用运行的过程中，发现需要的资源不足或已经有了大量剩余，也可以通过从保存点重启的方式，将应用程序的并行度增大或减小。
+
+*  暂停应用程序
+有时候我们不需要调整集群或者更新程序，只是单纯地希望把应用暂停、释放一些资源来处理更重要的应用程序。使用保存点就可以灵活实现应用的暂停和重启，可以对有限的集群资源做最好的优化配置
+
+保存点中状态都是以算子 ID-状态名称这样的 key-value 组织起来的，算子ID 可以在代码中直接调用 SingleOutputStreamOperator 的.uid()方法来进行指定
+
+```java
+DataStream<String> stream = env
+ .addSource(new StatefulSource())
+ .uid("source-id")
+ .map(new StatefulMapper())
+ .uid("mapper-id")
+ .print();
+```
+
+对于没有设置 ID 的算子，Flink 默认会自动进行设置，所以在重新启动应用后可能会导致ID 不同而无法兼容以前的状态。==所以为了方便后续的维护，强烈建议在程序中为每一个算子手动指定 ID。==
+
+#### 10.1.5.2 使用保存点
+
+可以使用命令行工具来创建保存点，也可以从保存点恢复作业。
+
+* 创建保存点
+
+  要在命令行中为运行的作业创建一个保存点镜像，只需要执行：
+
+```perl
+bin/flink savepoint :jobId [:targetDirectory]
+```
+
+这里 jobId 需要填充要做镜像保存的作业 ID，目标路径 targetDirectory 可选，表示保存点存储的路径。
+
+对于保存点的默认路径，可以通过配置文件 flink-conf.yaml 中的 state.savepoints.dir 项来设定：
+
+```yaml
+state.savepoints.dir: hdfs:///flink/savepoints
+```
+
+对于单独的作业，可以在程序代码中通过执行环境来设置：
+
+```java
+env.setDefaultSavepointDir("hdfs:///flink/savepoints");
+```
+
+由于创建保存点一般都是希望更改环境之后重启，所以创建之后往往紧接着就是停掉作业的操作。除了对运行的作业创建保存点，我们也可以在停掉一个作业时直接创建保存点：
+
+```perl
+bin/flink stop --savepointPath [:targetDirectory] :jobId
+```
+
+* 从保存点重启应用
+
+提交启动一个 Flink 作业，使用的命令是 flink run；从保存点重启一个应用，本质是一样的：
+
+```perl
+bin/flink run -s :savepointPath [:runArgs]
+```
+
+这里只要增加一个-s 参数，指定保存点的路径就可以了，其他启动时的参数还是完全一样的。
+
+## 10.2 状态一致性
+
+### 10.2.1 一致性的概念和级别
+
+多个节点并行处理不同的任务，要保证计算结果是正确的，就必须不漏掉任何一个数据，而且也不会重复处理同一个数据。
+
+在发生故障、需要恢复状态进行回滚时就需要更多的保障机制。我们通过检查点的保存来保证状态恢复后结果的正确，所以主要讨论的就是“状态的一致性”。
+
+状态一致性有三种级别：
+
+* 最多一次（AT-MOST-ONCE）
+  * 每个数据在正常情况下会被处理一次，遇到故障时就会丢掉，所以就是“最多处理一次”。
+  * 对近似正确的结果也能接受时，这也不失为一种很好的解决方案。
+
+* 至少一次（AT-LEAST-ONCE）
+  * 在实际应用中，我们一般会希望至少不要丢掉数据。这种一致性级别就叫作“至少一次”（at-least-once）
+  * 所有数据都不会丢，肯定被处理了；不过不能保证只处理一次，有些数据会被重复处理。
+  * 在有些场景下，重复处理数据是不影响结果的正确性的，这种操作具有“幂等性”。
+  * 为了保证达到 at-least-once 的状态一致性，我们需要在发生故障时能够重放数据。最常见的做法是，用持久化的事件日志系统，把所有的事件写入到持久化存储中。这时只要记录一个偏移量，当任务发生故障重启后，重置偏移量就可以重放检查点之后的数据了。Kafka 就是这种架构的一个典型实现。
+
+* 精确一次（EXACTLY-ONCE）
+  * 最严格的一致性保证，就是所谓的“精确一次”（exactly-once，有时也译作“恰好一次”）。
+  * 最难实现的状态一致性语义。exactly-once 意味着所有数据不仅不会丢失，而且只被处理一次，不会重复处理。也就是说对于每一个数据，最终体现在状态和输出结果上，只能有一次统计。
+  * exactly-once 可以真正意义上保证结果的绝对正确，在发生故障恢复后，就好像从未发生过故障一样。
+  * 要做到 exactly-once，首先必须能达到 at-least-once 的要求，就是数据不丢。所以同样需要有数据重放机制来保证这一点。另外，还需要有专门的设计保证每个数据只被处理一次。Flink 中使用的是一种轻量级快照机制——检查点（checkpoint）来保证 exactly-once 语义。
+
+### 10.2.2 端到端的状态一致性
+
+完整的流处理应用，应该包括了数据源、流处理器和外部存储系统三个部分。
+
+这个完整应用的一致性，就叫作“端到端（end-to-end）的状态一致性”，它取决于三个组件中最弱的那一环。
+
+一般来说，能否达到 at-least-once 一致性级别，主要看数据源能够重放数据；而能否达到 exactly-once 级别，流处理器内部、数据源、外部存储都要有相应的保证机制。
+
+## 10.3 端到端精确一次（end-to-end exactly-once）
+
+
+
