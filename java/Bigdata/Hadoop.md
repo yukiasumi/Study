@@ -1,8 +1,8 @@
-## hadoop入门
+## hadoop完全分布式
 
-### hadoop伪分布式搭建
+### hadoop伪分布式
 
-```
+```shell
 /etc/profile
 
 export JAVA_HOME=/usr/java/jdk1.8.0_271
@@ -123,7 +123,16 @@ myhadoop.sh stop  关闭Hadoop
 浏览器访问192.168.10.130:8088 -----yarn
 ```
 
+### hadoop完全分布式
 
+==先配置免密==
+
+集群部署规划
+
+|      | hadoop102        | hadoop103                  | hadoop104                 |
+| ---- | ---------------- | -------------------------- | ------------------------- |
+| HDFS | NameNodeDataNode | DataNode                   | SecondaryNameNodeDataNode |
+| YARN | NodeManager      | ResourceManagerNodeManager | NodeManager               |
 
 #### xsync分发脚本
 
@@ -197,6 +206,145 @@ done
 
 ==注意：如果用了sudo，那么xsync一定要给它的路径补全。==
 
+
+#### 配置集群
+
+##### core-site.xml
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+        <!-- 指定 NameNode 的地址 -->
+        <property>
+                <name>fs.defaultFS</name>
+                <value>hdfs://hadoop102:8020</value>
+        </property>
+        <!-- 指定 hadoop 数据的存储目录 -->
+        <property>
+                <name>hadoop.tmp.dir</name>
+                <value>/opt/module/hadoop-3.1.3/data</value>
+        </property>
+        <!-- 配置 HDFS 网页登录使用的静态用户为 atguigu -->
+        <property>
+                <name>hadoop.http.staticuser.user</name>
+                <value>atguigu</value>
+        </property>
+        <property>
+                <name>hadoop.proxyuser.atguigu.hosts</name>
+                <value>*</value>
+        </property>
+        <property>
+                <name>hadoop.proxyuser.atguigu.groups</name>
+                <value>*</value>
+        </property>
+</configuration>
+
+```
+
+##### hdfs.xml
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+
+<configuration>
+        <!-- nn web端访问地址-->
+        <property>
+        <name>dfs.namenode.http-address</name>
+        <value>hadoop102:9870</value>
+    </property>
+        <!-- 2nn web端访问地址-->
+    <property>
+        <name>dfs.namenode.secondary.http-address</name>
+        <value>hadoop104:9868</value>
+    </property>
+</configuration>
+
+```
+
+##### yarn-site.xml
+
+```xml
+<?xml version="1.0"?>
+<configuration>
+
+<!-- Site specific YARN configuration properties -->
+    <!-- 指定MR走shuffle -->
+    <property>
+        <name>yarn.nodemanager.aux-services</name>
+        <value>mapreduce_shuffle</value>
+    </property>
+
+    <!-- 指定ResourceManager的地址-->
+    <property>
+        <name>yarn.resourcemanager.hostname</name>
+        <value>hadoop103</value>
+    </property>
+
+    <!-- 环境变量的继承 -->
+    <property>
+        <name>yarn.nodemanager.env-whitelist</name>
+        <value>JAVA_HOME,HADOOP_COMMON_HOME,HADOOP_HDFS_HOME,HADOOP_CONF_DIR,CLASSPATH_PREPEND_DISTCACHE,HADOOP_YARN_HOME,HADOOP_MAPRED_HOME</value>
+    </property>
+
+        <!-- 开启日志聚集功能 -->
+        <property>
+                <name>yarn.log-aggregation-enable</name>
+                <value>true</value>
+        </property>
+        <!-- 设置日志聚集服务器地址 -->
+        <property>
+                <name>yarn.log.server.url</name>
+                <value>http://hadoop102:19888/jobhistory/logs</value>
+        </property>
+        <!-- 设置日志保留时间为7天 -->
+        <property>
+                <name>yarn.log-aggregation.retain-seconds</name>
+                <value>604800</value>
+        </property>
+        <!--是否启动一个线程检查每个任务正使用的物理内存量，如果任务超出分配值，则直接将其杀掉，默认
+     是 true -->
+        <property>
+                <name>yarn.nodemanager.pmem-check-enabled</name>
+                <value>false</value>
+        </property>
+        <!--是否启动一个线程检查每个任务正使用的虚拟内存量，如果任务超出分配值，则直接将其杀掉，默认
+     是 true -->
+        <property>
+                <name>yarn.nodemanager.vmem-check-enabled</name>
+                <value>false</value>
+        </property>
+</configuration>
+
+```
+
+##### mapred-site.xml
+
+```xml
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+
+<configuration>
+        <!-- 指定MapReduce程序运行在Yarn上 -->
+    <property>
+        <name>mapreduce.framework.name</name>
+        <value>yarn</value>
+    </property>
+        <!-- 历史服务器端地址 -->
+        <property>
+                <name>mapreduce.jobhistory.address</name>
+                <value>hadoop102:10020</value>
+        </property>
+
+        <!-- 历史服务器web端地址 -->
+        <property>
+                <name>mapreduce.jobhistory.webapp.address</name>
+                <value>hadoop102:19888</value>
+        </property>
+</configuration>
+
+```
 #### 配置workers
 
 ```
@@ -218,6 +366,7 @@ hadoop104
 ```
 [atguigu@hadoop102 hadoop]$ xsync /opt/module/hadoop-3.1.3/etc
 ```
+
 
 #### 启动集群
 

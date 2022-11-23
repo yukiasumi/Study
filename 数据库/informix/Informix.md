@@ -198,7 +198,8 @@ select * from sysmaster;
 dbaccess 库名 1.sql
 
 2.语句
-echo "select * from sysmaster" | dbaccess 1.sql
+echo "select * from sysmaster" | dbaccess 库名
+echo "select * from sysusers" | dbaccess syscdcv1
 
 3.数据文件
 dbaccess 库名 <<!

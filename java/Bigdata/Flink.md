@@ -6075,5 +6075,1185 @@ public class CoGroupExample {
 
 # 9 状态编程
 
+## 9.1 Flink 中的状态
 
+### 9.1.1 有状态算子
+
+在 Flink 中，算子任务可以分为无状态和有状态两种情况
+
+计算时不依赖其他数据，就都属于无状态的算子。（map、filter、flatMap）
+
+![image-20221123085511707](../../images/image-20221123085511707.png)
+
+有状态的算子任务，除当前数据之外，还需要一些其他数据来得到计算结果。这里的“其他数据”，就是所谓的状态（state）
+
+![image-20221123090000187](../../images/image-20221123090000187.png)
+
+有状态算子的一般处理流程，具体步骤如下。
+* 算子任务接收到上游发来的数据；
+* 获取当前状态；
+* 根据业务逻辑进行计算，更新状态；
+* 得到计算结果，输出发送到下游任务。
+
+### 9.1.2 状态的管理
+
+Flink 将状态直接保存在内存中来保证性能，并通过分布式扩展来提高吞吐量。
+
+Flink 有一套完整的状态管理机制，将底层一些核心功能全部封装起来，包括状态的高效存储和访问、持久化保存和故障恢复，以及资源扩展时的调整。
+
+* 状态的访问权限。
+* 容错性，也就是故障后的恢复。
+* 横向扩展性。
+
+### 9.1.3 状态的分类
+
+#### 9.1.3.1 托管状态（Managed State）和原始状态（Raw State）
+
+托管状态就是由 Flink 统一管理的，只要调接口就可以；
+
+原始状态则是自定义的，相当于就是开辟了一块内存，需要自己管理，实现状态的序列化和故障恢复。
+
+只有在遇到托管状态无法实现的特殊需求时，才会考虑使用原始状态
+
+#### 9.1.3.2 算子状态（Operator State）和按键分区状态（Keyed State）
+
+按键分区之后，任务所进行的所有计算都应该只针对当前 key 有效，所以状态也应该按照 key 彼此隔离。
+
+Keyed State 和 Operator State，都是在本地实例上维护的，每个并行子任务维护着对应的状态，算子的子任务之间状态不共享
+
+**算子状态（Operator State）**
+
+算子状态可以用在所有算子上，使用的时候其实就跟一个本地变量没什么区别——因为本地变量的作用域也是当前任务实例。在使用时，还需进一步实现 CheckpointedFunction 接口。
+
+**算子状态对于同一任务而言是共享的。**
+
+
+
+![image-20221123091734016](../../images/image-20221123091734016.png)
+
+**按键分区状态（Keyed State）**
+
+状态是根据输入流中定义的键（key）来维护和访问的，只能定义在按键分区流（KeyedStream）中， keyBy 之后才可以使用
+
+![image-20221123092045742](../../images/image-20221123092045742.png)
+
+可以通过富函数类（Rich Function）来自定义 Keyed State，只要提供了富函数类接口的算子，也都可以使用 Keyed State。
+
+即使是 map、filter 这样无状态的基本转换算子，也可以通过富函数类“追加”Keyed State，或者实现 CheckpointedFunction 接口来定义 Operator State，Flink 中所有的算子都可以是有状态的
+
+## 9.2 按键分区状态（Keyed State）
+
+### 9.2.1 基本概念和特点
+
+按键分区状态（Keyed State）是任务按照键（key）来访问和维护的状态，以 key 为作用范围进行隔离
+
+在底层，Keyed State 类似于一个分布式的映射（map）数据结构，所有的状态会根据 key 保存成键值对（key-value）的形式。这样当一条数据到来时，任务就会自动将状态的访问范围限定为当前数据的 key，从 map 存储中读取出对应的状态值。所以具有相同 key 的所有数据都会到访问相同的状态，而不同 key 的状态之间是彼此隔离的。
+
+在应用的并行度改变时，状态也需要随之进行重组。一个并行子任务中的不同 key 对应的 Keyed State可以进一步组成所谓的键组（key groups），每一组都对应着一个并行子任务。
+
+键组是 Flink 重新分配 Keyed State 的单元，键组的数量就等于定义的最大并行度。当算子并行度发生改变时，Keyed State 就会按照当前的并行度重新平均分配，保证运行时各个子任务的负载相同。
+
+**使用 Keyed State 必须基于 KeyedStream**
+
+### 9.2.2 支持的结构类型
+
+#### 9.2.2.1 值状态（ValueState）
+
+状态中只保存一个“值”（value）
+
+```java
+public interface ValueState<T> extends State {
+	T value() throws IOException;
+	void update(T value) throws IOException;
+}
+```
+
+* T value()：获取当前状态的值；
+
+* update(T value)：对状态进行更新，传入的参数 value 就是要覆写的状态值。
+
+使用时需要创建一个状态描述器（StateDescriptor）提供状态的基本信息，让运行时上下文清楚到底是哪个状态
+
+```java
+public ValueStateDescriptor(String name, Class<T> typeClass) {
+	 super(name, typeClass, null);
+}
+```
+
+需要传入状态的名称和类型，有了这个描述器，运行时环境就可以获取到状态的控制句柄（handler）了。
+
+#### 9.2.2.2 列表状态（ListState）
+
+需要保存的数据，以列表（List）的形式组织起来。
+
+ListState<T>
+
+ListState 也提供了一系列的方法来操作状态，使用方式与一般的 List 非常相似。
+
+* Iterable<T> get()：获取当前的列表状态，返回的是一个可迭代类型 Iterable<T>；
+
+* update(List<T> values)：传入一个列表 values，直接对状态进行覆盖；
+
+* add(T value)：在状态列表中添加一个元素 value；
+
+* addAll(List<T> values)：向列表中添加多个元素，以列表 values 形式传入。
+
+类似地，ListState 的状态描述器就叫作 ListStateDescriptor，用法跟 ValueStateDescriptor完全一致。
+
+#### 9.2.2.3 映射状态（MapState）
+
+把一些键值对（key-value）作为状态整体保存起来，可以认为就是一组 key-value 映射的列表
+
+MapState<UK, UV> ：泛型表示保存的 key和 value 的类型。
+
+*  UV get(UK key)：传入一个 key 作为参数，查询对应的 value 值；
+*  put(UK key, UV value)：传入一个键值对，更新 key 对应的 value 值；
+*  putAll(Map<UK, UV> map)：将传入的映射 map 中所有的键值对，全部添加到映射状态中；
+*  remove(UK key)：将指定 key 对应的键值对删除；
+*  boolean contains(UK key)：判断是否存在指定的 key，返回一个 boolean 值。
+另外，MapState 也提供了获取整个映射相关信息的方法：
+*  Iterable<Map.Entry<UK, UV>> entries()：获取映射状态中所有的键值对；
+*  Iterable<UK> keys()：获取映射状态中所有的键（key），返回一个可迭代 Iterable 类型；
+*  Iterable<UV> values()：获取映射状态中所有的值（value），返回一个可迭代 Iterable
+类型；
+*  boolean isEmpty()：判断映射是否为空，返回一个 boolean 值。
+
+#### 9.2.2.4 归约状态（ReducingState）
+
+对添加进来的所有数据进行归约，将归约聚合之后的值作为状态保存下来。
+
+ReducintState<T> 调用的方法类似于 ListState，保存的只是一个聚合值，调用.add()方法时，是把新数据和之前的状态进行归约，并用得到的结果更新状态。
+
+```java
+public ReducingStateDescriptor(String name, ReduceFunction<T> reduceFunction, Class<T> typeClass) {...}
+```
+
+ ReduceFunction是定义了归约聚合逻辑的，另外两个参数则是状态的名称和类型
+
+#### 9.2.2.5 聚合状态（AggregatingState）
+
+聚合状态也是一个值，用来保存添加进来的所有数据的聚合结果。
+
+在描述器中传入一个更加一般化的聚合函数（AggregateFunction）定义聚合逻辑；
+
+通过一个累加器（Accumulator）来表示状态，状态类型可以跟添加进来的数据类型完全不同，使用更加灵活。
+
+### 9.2.3 代码实现
+
+算子在使用状态前首先需要“注册”，告诉 Flink 当前上下文中定义状态的信息，这样运行时的 Flink 才能知道算子有哪些状态。
+
+状态的注册，主要是通过“状态描述器”（StateDescriptor）来实现的。状态描述器中最重要的内容，就是状态的名称（name）和类型（type）。我们知道 Flink 中的状态，可以认为是加了一些复杂操作的内存中的变量；而当我们在代码中声明一个局部变量时，都需要指定变量类型和名称，名称就代表了变量在内存中的地址，类型则指定了占据内存空间的大小。
+
+一旦指定了名称和类型，Flink 就可以在运行时准确地在内存中找到对应的状态，进而返回状态对象供我们使用了。
+
+在一个算子中，我们也可以定义多个状态，只要它们的名称不同就可以了。
+
+状态描述器中还可能需要传入一个用户自定义函数（UDF），用来说明处理逻辑，如ReduceFunction 和 AggregateFunction。
+
+以 ValueState 为例，我们可以定义值状态描述器如下：
+
+```java
+//定义一个叫作“my state”的长整型 ValueState 的描述器。
+ValueStateDescriptor<Long> descriptor = new ValueStateDescriptor<>(
+	"my state", // 状态名称
+	Types.LONG // 状态类型
+);
+```
+
+首先定义出状态描述器；
+
+然后调用.getRuntimeContext()方法获取运行时上下文；
+
+再调用 RuntimeContext 的获取状态的方法，将状态描述器传入，就可以得到对应的状态了。
+
+在富函数中，调用.getRuntimeContext()方法获取到运行时上下文之后，RuntimeContext 有以下几个获取状态的方法：
+
+```java
+ValueState<T> getState(ValueStateDescriptor<T>)
+MapState<UK, UV> getMapState(MapStateDescriptor<UK, UV>)
+ListState<T> getListState(ListStateDescriptor<T>)
+ReducingState<T> getReducingState(ReducingStateDescriptor<T>)
+AggregatingState<IN, OUT> getAggregatingState(AggregatingStateDescriptor<IN, ACC, OUT>)
+```
+
+对于不同结构类型的状态，只要传入对应的描述器、调用对应的方法就可以了。
+
+获取到状态对象之后，就可以调用它们各自的方法进行读写操作了。
+
+所有类型的状态都有一个方法.clear()，用于清除当前状态。
+
+```java
+ public static class MyFlatMapFunction extends RichFlatMapFunction<Long, String> {
+        // 声明状态
+        private transient ValueState<Long> state;
+
+        @Override
+        public void open(Configuration config) {
+            // 在 open 生命周期方法中获取状态
+            ValueStateDescriptor<Long> descriptor = new ValueStateDescriptor<>(
+                    "my state", // 状态名称
+                    Types.LONG // 状态类型
+            );
+            state = getRuntimeContext().getState(descriptor);
+        }
+
+        @Override
+        public void flatMap(Long input, Collector<String> out) throws Exception {
+            // 访问状态
+            Long currentState = state.value();
+            currentState += 1; // 状态数值加 1
+            // 更新状态
+            state.update(currentState);
+            if (currentState >= 100) {
+                out.collect("state: "+currentState);
+                state.clear(); // 清空状态，只会清除当前 key 对应的状态
+            }
+        }
+    }
+```
+
+状态不一定都存储在内存中，也可以放在磁盘或其他地方，具体的位置是由一个可配置的组件来管理的，这个组件叫作“状态后端”（State Backend）
+
+#### 9.2.3.1 值状态（ValueState）
+
+使用用户 id 来进行分流，然后分别统计每个用户的 pv 数据
+
+注册一个定时器，用来隔一段时间发送 pv 的统计结果
+
+定义一个用来保存定时器时间戳的值状态变量。当定时器触发并向下游发送数据以后，便清空储存定时器时间戳的状态变量，这样当新的数据到来时，发现并没有定时器存在，就可以注册新的定时器了，注册完定时器之后将定时器的时间戳继续保存在状态变量中。
+
+```java
+package org.neptune.State;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.util.Collector;
+import org.neptune.DataStreamAPI.SourceClick;
+import org.neptune.pojo.Event;
+
+public class PeriodicPvExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        SingleOutputStreamOperator<Event> stream = env.addSource(new SourceClick())
+                .assignTimestampsAndWatermarks(WatermarkStrategy.<Event>forMonotonousTimestamps()
+                        .withTimestampAssigner(new SerializableTimestampAssigner<Event>() {
+                            @Override
+                            public long extractTimestamp(Event element, long
+                                    recordTimestamp) {
+                                return element.timestamp;
+                            }
+                        })
+                );
+        stream.print("input");
+        // 统计每个用户的 pv，隔一段时间（10s）输出一次结果
+        stream.keyBy(data -> data.user)
+                .process(new PeriodicPvResult())
+                .print();
+        env.execute();
+    }
+
+    // 注册定时器，周期性输出 pv
+    public static class PeriodicPvResult extends KeyedProcessFunction<String, Event, String> {
+        // 定义两个状态，保存当前 pv 值，以及定时器时间戳
+        ValueState<Long> countState;
+        ValueState<Long> timerTsState;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            countState = getRuntimeContext().getState(new ValueStateDescriptor<Long>("count", Long.class));
+            timerTsState = getRuntimeContext().getState(new ValueStateDescriptor<Long>("timerTs", Long.class));
+        }
+
+        @Override
+        public void processElement(Event value, Context ctx, Collector<String> out)
+                throws Exception {
+            // 更新 count 值
+            Long count = countState.value();
+            if (count == null) {
+                countState.update(1L);
+            } else {
+                countState.update(count + 1);
+            }
+            // 注册定时器
+            if (timerTsState.value() == null) {
+                ctx.timerService().registerEventTimeTimer(value.timestamp + 10 * 1000L);
+                timerTsState.update(value.timestamp + 10 * 1000L);
+            }
+        }
+
+        @Override
+        public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
+            out.collect(ctx.getCurrentKey() + " pv: " + countState.value());
+            // 清空状态
+            timerTsState.clear();
+        }
+    }
+}
+```
+
+#### 9.2.3.2 列表状态（ListState）
+
+两条流的全量 Join：
+
+```sql
+SELECT * FROM A INNER JOIN B WHERE A.id = B.id；
+```
+
+```java
+package org.neptune.State;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.co.CoProcessFunction;
+import org.apache.flink.util.Collector;
+
+public class TwoStreamFullJoinExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        SingleOutputStreamOperator<Tuple3<String, String, Long>> stream1 = env
+                .fromElements(
+                        Tuple3.of("a", "stream-1", 1000L),
+                        Tuple3.of("b", "stream-1", 2000L)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy.<Tuple3<String, String,
+                                        Long>>forMonotonousTimestamps()
+                                .withTimestampAssigner(new SerializableTimestampAssigner<Tuple3<String, String, Long>>() {
+                                    @Override
+                                    public long extractTimestamp(Tuple3<String,
+                                            String, Long> t, long l) {
+                                        return t.f2;
+                                    }
+                                })
+                );
+        SingleOutputStreamOperator<Tuple3<String, String, Long>> stream2 = env
+                .fromElements(
+                        Tuple3.of("a", "stream-2", 3000L),
+                        Tuple3.of("b", "stream-2", 4000L)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy.<Tuple3<String, String,
+                                        Long>>forMonotonousTimestamps()
+                                .withTimestampAssigner(new SerializableTimestampAssigner<Tuple3<String, String, Long>>() {
+                                    @Override
+                                    public long extractTimestamp(Tuple3<String,
+                                            String, Long> t, long l) {
+                                        return t.f2;
+                                    }
+                                })
+                );
+        stream1.keyBy(r -> r.f0)
+                .connect(stream2.keyBy(r -> r.f0))
+                .process(new CoProcessFunction<Tuple3<String, String, Long>,
+                        Tuple3<String, String, Long>, String>() {
+                    private ListState<Tuple3<String, String, Long>>
+                            stream1ListState;
+                    private ListState<Tuple3<String, String, Long>>
+                            stream2ListState;
+
+                    @Override
+                    public void open(Configuration parameters) throws Exception {
+                        super.open(parameters);
+                        stream1ListState = getRuntimeContext().getListState(
+                                new ListStateDescriptor<Tuple3<String, String,
+                                        Long>>("stream1-list", Types.TUPLE(Types.STRING, Types.STRING))
+                        );
+                        stream2ListState = getRuntimeContext().getListState(
+                                new ListStateDescriptor<Tuple3<String, String,
+                                        Long>>("stream2-list", Types.TUPLE(Types.STRING, Types.STRING))
+                        );
+                    }
+
+                    @Override
+                    public void processElement1(Tuple3<String, String, Long> left,
+                                                Context context, Collector<String> collector) throws Exception {
+                        stream1ListState.add(left);
+                        for (Tuple3<String, String, Long> right :
+                                stream2ListState.get()) {
+                            collector.collect(left + " => " + right);
+                        }
+                    }
+
+                    @Override
+                    public void processElement2(Tuple3<String, String, Long> right,
+                                                Context context, Collector<String> collector) throws Exception {
+                        stream2ListState.add(right);
+                        for (Tuple3<String, String, Long> left :
+                                stream1ListState.get()) {
+                            collector.collect(left + " => " + right);
+                        }
+                    }
+                })
+                .print();
+        env.execute();
+    }
+}
+```
+
+#### 9.2.3.3 映射状态（MapState）
+
+模拟一个滚动窗口。计算每一个 url 在每一个窗口中的 pv 数据。
+
+```java
+package org.neptune.State;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.util.Collector;
+import org.neptune.DataStreamAPI.SourceClick;
+import org.neptune.pojo.Event;
+
+import java.sql.Timestamp;
+
+// 使用 KeyedProcessFunction 模拟滚动窗口
+public class FakeWindowExample {
+
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        SingleOutputStreamOperator<Event> stream = env.addSource(new SourceClick())
+                .assignTimestampsAndWatermarks(WatermarkStrategy.<Event>forMonotonousTimestamps()
+                        .withTimestampAssigner(new SerializableTimestampAssigner<Event>() {
+                            @Override
+                            public long extractTimestamp(Event element, long
+                                    recordTimestamp) {
+                                return element.timestamp;
+                            }
+                        })
+                );
+        // 统计每 10s 窗口内，每个 url 的 pv
+        stream.keyBy(data -> data.url)
+                .process(new FakeWindowResult(10000L))
+                .print();
+        env.execute();
+    }
+
+    public static class FakeWindowResult extends KeyedProcessFunction<String, Event, String> {
+        // 定义属性，窗口长度
+        private Long windowSize;
+
+        public FakeWindowResult(Long windowSize) {
+            this.windowSize = windowSize;
+        }
+
+        // 声明状态，用 map 保存 pv 值（窗口 start，count）
+        MapState<Long, Long> windowPvMapState;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            windowPvMapState = getRuntimeContext().getMapState(
+                    new MapStateDescriptor<Long, Long>("window-pv", Long.class, Long.class));
+        }
+
+        @Override
+        public void processElement(Event value, Context ctx, Collector<String> out)
+                throws Exception {
+            // 每来一条数据，就根据时间戳判断属于哪个窗口
+            Long windowStart = value.timestamp / windowSize * windowSize;
+            Long windowEnd = windowStart + windowSize;
+            // 注册 end -1 的定时器，窗口触发计算
+            ctx.timerService().registerEventTimeTimer(windowEnd - 1);
+            // 更新状态中的 pv 值
+            if (windowPvMapState.contains(windowStart)) {
+                Long pv = windowPvMapState.get(windowStart);
+                windowPvMapState.put(windowStart, pv + 1);
+            } else {
+                windowPvMapState.put(windowStart, 1L);
+            }
+        }
+
+        // 定时器触发，直接输出统计的 pv 结果
+        @Override
+        public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
+            Long windowEnd = timestamp + 1;
+            Long windowStart = windowEnd - windowSize;
+            Long pv = windowPvMapState.get(windowStart);
+            out.collect("url: " + ctx.getCurrentKey()
+                    + " 访问量: " + pv
+                    + " 窗 口 ： " + new Timestamp(windowStart) + " ~ " + new
+                    Timestamp(windowEnd));
+            // 模拟窗口的销毁，清除 map 中的 key
+            windowPvMapState.remove(windowStart);
+        }
+    }
+}
+```
+
+#### 9.2.3.4 聚合状态（AggregatingState）
+
+对用户点击事件流每 5 个数据统计一次平均时间戳。
+
+类似计数窗口（CountWindow）求平均值的计算
+
+```java
+package org.neptune.State;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.AggregateFunction;
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import org.apache.flink.api.common.state.AggregatingState;
+import org.apache.flink.api.common.state.AggregatingStateDescriptor;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.util.Collector;
+import org.neptune.DataStreamAPI.SourceClick;
+import org.neptune.pojo.Event;
+
+import java.sql.Timestamp;
+
+public class AverageTimestampExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        SingleOutputStreamOperator<Event> stream = env.addSource(new SourceClick())
+                .assignTimestampsAndWatermarks(WatermarkStrategy.<Event>forMonotonousTimestamps()
+                        .withTimestampAssigner(new SerializableTimestampAssigner<Event>() {
+                            @Override
+                            public long extractTimestamp(Event element, long
+                                    recordTimestamp) {
+                                return element.timestamp;
+                            }
+                        })
+                );
+        // 统计每个用户的点击频次，到达 5 次就输出统计结果
+        stream.keyBy(data -> data.user)
+                .flatMap(new AvgTsResult())
+                .print();
+        env.execute();
+    }
+
+    public static class AvgTsResult extends RichFlatMapFunction<Event, String> {
+        // 定义聚合状态，用来计算平均时间戳
+        AggregatingState<Event, Long> avgTsAggState;
+        // 定义一个值状态，用来保存当前用户访问频次
+        ValueState<Long> countState;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            avgTsAggState = getRuntimeContext().getAggregatingState(
+                    new AggregatingStateDescriptor<Event, Tuple2<Long, Long>, Long>(
+                    "avg-ts",
+                    new AggregateFunction<Event, Tuple2<Long, Long>, Long>() {
+                        @Override
+                        public Tuple2<Long, Long> createAccumulator() {
+                            return Tuple2.of(0L, 0L);
+                        }
+
+                        @Override
+                        public Tuple2<Long, Long> add(Event value, Tuple2<Long, Long>
+                                accumulator) {
+                            return Tuple2.of(accumulator.f0 + value.timestamp,
+                                    accumulator.f1 + 1);
+                        }
+
+                        @Override
+                        public Long getResult(Tuple2<Long, Long> accumulator) {
+                            return accumulator.f0 / accumulator.f1;
+                        }
+
+                        @Override
+                        public Tuple2<Long, Long> merge(Tuple2<Long, Long> a,
+                                                        Tuple2<Long, Long> b) {
+                            return null;
+                        }
+                    },
+                    Types.TUPLE(Types.LONG, Types.LONG)
+            ));
+            countState = getRuntimeContext().getState(new ValueStateDescriptor<Long>("count", Long.class));
+        }
+
+        @Override
+        public void flatMap(Event value, Collector<String> out) throws Exception {
+            Long count = countState.value();
+            if (count == null) {
+                count = 1L;
+            } else {
+                count++;
+            }
+            countState.update(count);
+            avgTsAggState.add(value);
+            // 达到 5 次就输出结果，并清空状态
+            if (count == 5) {
+                out.collect(value.user + " 平均时间戳： " + new Timestamp(avgTsAggState.get()));
+                countState.clear();
+            }
+        }
+    }
+}
+```
+
+### 9.2.4 状态生存时间（TTL）
+
+状态的“生存时间”（time-to-live，TTL），当状态在内存中存在的时间超出这个值时，就将它清除。
+
+状态创建的时候，设置 失效时间 = 当前时间 + TTL；
+
+之后如果有对状态的访问和修改，可以再对失效时间进行更新；当设置的清除条件被触发时，就可以判断状态是否失效、从而进行清除了。
+
+配置状态的 TTL 时，需要创建一个 StateTtlConfig 配置对象，然后调用状态描述器的.enableTimeToLive()方法启动 TTL 功能。
+
+```java
+StateTtlConfig ttlConfig = StateTtlConfig
+ .newBuilder(Time.seconds(10))
+ .setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite)
+ .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
+ .build();
+ValueStateDescriptor<String> stateDescriptor = new ValueStateDescriptor<>("mystate", String.class);
+stateDescriptor.enableTimeToLive(ttlConfig);
+```
+
+* .newBuilder()
+  状态 TTL 配置的构造器方法，必须调用，返回一个 Builder 之后再调用.build()方法就可以得到 StateTtlConfig 了。方法需要传入一个 Time 作为参数，这就是**设定的状态生存时间**。
+
+* .setUpdateType()
+  设置更新类型。更新类型指定了什么时候更新状态失效时间，**默认为 OnCreateAndWrite**
+
+  * OnCreateAndWrite表示只有创建状态和更改状态（写操作）时更新失效时间。
+  *  OnReadAndWrite 则表示无论读写操作都会更新失效时间，也就是只要对状态进行了访问，就表明它是活跃的，从而延长生存时间。
+
+*  .setStateVisibility()
+设置状态的可见性。所谓的“状态可见性”，是指因为清除操作并不是实时的，所以当状态过期之后还有可能基于存在，这时如果对它进行访问，能否正常读取到就是一个问题了。**默认为NeverReturnExpired **
+
+*  NeverReturnExpired 表示从不返回过期值，也就是只要过期就认为它已经被清除了，应用不能继续读取；这在处理会话或者隐私数据时比较重要。
+
+* ReturnExpireDefNotCleanedUp，如果过期状态还存在，就返回它的值。
+
+TTL 配置可以设置在保存检查点（checkpoint）时触发清除操作，配置增量的清理（incremental cleanup），针对 RocksDB 状态后端使用压缩过滤器（compaction filter）进行后台清理。
+
+目前的 TTL 设置只支持处理时间。
+
+所有集合类型的状态（ListState、MapState）在设置 TTL 时，都是针对每一项（per-entry）元素的。一个列表状态中的每一个元素，都会以自己的失效时间来进行清理，而不是整个列表一起清理。
+
+## 9.3 算子状态（Operator State）
+
+只针对当前算子并行任务有效，不需要考虑不同 key 的隔离。功能不如按键分区状态丰富，应用场景较少
+
+### 9.3.1 基本概念和特点
+
+* 算子状态（Operator State）是一个算子并行实例上定义的状态，作用范围被限定为当前算子任务。
+
+* 算子状态跟数据的 key 无关，不同 key 的数据只要被分发到同一个并行子任务，就会访问到同一个 Operator State。
+
+* 算子状态的实际应用场景不如 Keyed State 多，一般用在 Source 或 Sink 等与外部系统连接的算子上，或者完全没有 key 定义的场景。比如 Flink 的 Kafka 连接器中，就用到了算子状态。
+
+给 Source 算子设置并行度后，Kafka 消费者的每一个并行实例，都会为对应的topic分区维护一个偏移量， 作为算子状态保存起来。这在保证 Flink 应用“精确一次”（exactly-once）状态一致性时非常有用。
+
+当算子的并行度发生变化时，算子状态也支持在并行的算子任务实例之间做重组分配。根据状态的类型不同，重组分配的方案也会不同。
+
+### 9.3.2 状态类型
+
+算子状态也支持不同的结构类型，主要有三种：ListState、UnionListState 和 BroadcastState。
+
+#### 9.3.2.1 列表状态（ListState）
+
+将状态表示为一组数据的列表。每一个并行子任务上只会保留一个“列表”（list）
+
+算子并行度进行缩放调整时，算子的列表状态中的所有元素项会被统一收集起来，合并成了一个“大列表”，然后再均匀地分配给所有并行任务。这种“均匀分配”的具体方法就是“轮询”（round-robin），
+
+#### 9.3.2.2 联合列表状态（UnionListState）
+
+与ListState态的区别在于，算子并行度进行缩放调整时对于状态的分配方式不同
+
+（联合重组union redistribution）
+
+分配方式是直接广播状态的完整列表，可以自行选择要使用的状态项和要丢弃的状态项
+
+#### 9.3.2.3 广播状态（BroadcastState）
+
+算子并行子任务都保持同一份“全局”状态，用来做统一的配置和规则设定。
+
+所有分区的所有数据可以访问到同一个状态，状态就像被“广播”到所有分区一样，叫作广播状态（BroadcastState）。
+
+广播状态在每个并行子任务上的实例都一样，所以在并行度调整的时候就比较简单，只要复制一份到新的并行任务就可以实现扩展；而对于并行度缩小的情况，可以将多余的并行子任务连同状态直接砍掉——因为状态都是复制出来的，并不会丢失。
+
+在底层，广播状态是以类似映射结构（map）的键值对（key-value）来保存的，必须基于一个“广播流”（BroadcastStream）来创建。
+
+### 9.3.3 代码实现
+
+对于 Operator State 来说，发生故障重启之后，不能保证某个数据跟之前一样，进入到同一个并行子任务、访问同一个状态。 Flink 无法直接判断该怎样保存和恢复状态，而是提供了接口，根据业务需求自行设计状态的快照保存（snapshot）和恢复（restore）逻辑
+
+#### 9.3.3.1 CheckpointedFunction 接口
+
+Flink 中，对状态进行持久化保存的快照机制叫作“检查点”（Checkpoint）。
+
+使用算子状态时，需要对检查点的相关操作进行定义，实现一个 CheckpointedFunction 接口。
+
+对于传入的Context参数：
+
+* snapshotState()方法拿到的是快照的上下文 FunctionSnapshotContext，可以提供检查点的相关信息，无法获取状态句柄
+* initializeState()方法拿到的是FunctionInitializationContext，这是函数类进行初始化时的上下文，是真正的“运行时上下文”。
+
+```java
+public interface CheckpointedFunction {
+	// 保存状态快照到检查点时，调用这个方法，定义检查点的快照保存逻辑
+	void snapshotState(FunctionSnapshotContext context) throws Exception
+	// 初始化状态时调用这个方法，也会在恢复状态时调用，定义初始化逻辑和恢复逻辑。
+	void initializeState(FunctionInitializationContext context) throws Exception;
+}
+```
+
+FunctionInitializationContext 中提供了“算子状态存储”（OperatorStateStore）和“按键分区状态存储（” KeyedStateStore），在这两个存储对象中可以非常方便地获取当前任务实例中的 OperatorState 和 Keyed State。
+
+```java
+ListStateDescriptor<String> descriptor =new ListStateDescriptor<>("buffered-elements",Types.of(String));
+
+ListState<String> checkpointedState = context.getOperatorStateStore().getListState(descriptor);
+```
+
+算子状态的注册：
+
+* 先定义一个状态描述器（StateDescriptor），告诉 Flink 当前状态的名称和类型
+* 然后从上下文提供的算子状态存储（OperatorStateStore）中获取对应的状态对象。从 KeyedStateStore 中获取 Keyed State也一样，前提是必须基于定义了 key 的 KeyedStream。
+
+CheckpointedFunction 是 Flink 中非常底层的接口，它为有状态的流处理提供了灵活且丰富的应用
+
+#### 9.3.3.2 实例代码
+
+自定义的 SinkFunction 会在CheckpointedFunction 中进行数据缓存，然后统一发送到下游。
+
+* isRestored()方法可以判断是否是从故障中恢复。
+
+* BufferingSink 初始化时，恢复出的 ListState 的所有元素会添加到一个局部变量bufferedElements 中，以后进行检查点快照时就可以直接使用了。
+
+* 调用.snapshotState()时，直接清空 ListState，然后把当前局部变量中的所有元素写入到检查点中。
+
+```java
+package org.neptune.State;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.runtime.state.FunctionInitializationContext;
+import org.apache.flink.runtime.state.FunctionSnapshotContext;
+import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.sink.SinkFunction;
+import org.neptune.DataStreamAPI.SourceClick;
+import org.neptune.pojo.Event;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class BufferingSinkExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        SingleOutputStreamOperator<Event> stream = env.addSource(new SourceClick())
+                .assignTimestampsAndWatermarks(WatermarkStrategy.<Event>forMonotonousTimestamps()
+                        .withTimestampAssigner(new SerializableTimestampAssigner<Event>() {
+                            @Override
+                            public long extractTimestamp(Event element, long
+                                    recordTimestamp) {
+                                return element.timestamp;
+                            }
+                        })
+                );
+        stream.print("input");
+        // 批量缓存输出
+        stream.addSink(new BufferingSink(10));
+        env.execute();
+    }
+
+    public static class BufferingSink implements SinkFunction<Event>, CheckpointedFunction {
+        private final int threshold;
+        private transient ListState<Event> checkpointedState;
+        private List<Event> bufferedElements;
+
+        public BufferingSink(int threshold) {
+            this.threshold = threshold;
+            this.bufferedElements = new ArrayList<>();
+        }
+
+        @Override
+        public void invoke(Event value, Context context) throws Exception {
+            bufferedElements.add(value);
+            if (bufferedElements.size() == threshold) {
+                for (Event element : bufferedElements) {
+                    // 输出到外部系统，这里用控制台打印模拟
+                    System.out.println(element);
+                }
+                System.out.println("==========输出完毕=========");
+                bufferedElements.clear();
+            }
+        }
+
+        @Override
+        public void snapshotState(FunctionSnapshotContext context) throws Exception {
+            checkpointedState.clear();
+            // 把当前局部变量中的所有元素写入到检查点中
+            for (Event element : bufferedElements) {
+                checkpointedState.add(element);
+            }
+        }
+
+        @Override
+        public void initializeState(FunctionInitializationContext context) throws Exception {
+            ListStateDescriptor<Event> descriptor = new ListStateDescriptor<>(
+                    "buffered-elements",
+                    Types.POJO(Event.class));
+            checkpointedState = context.getOperatorStateStore().getListState(descriptor);
+            // 如果是从故障中恢复，就将 ListState 中的所有元素添加到局部变量中
+            if (context.isRestored()) {
+                for (Event element : checkpointedState.get()) {
+                    bufferedElements.add(element);
+                }
+            }
+        }
+    }
+}
+```
+
+## 9.4 广播状态（Broadcast State）
+
+状态广播出去，所有并行子任务的状态都是相同的；并行度调整时只要直接复制就可以了
+
+### 9.4.1 基本用法
+
+配置随着时间推移还会动态变化(动态配置)
+
+将动态的配置数据看作一条流，将这条流和本身要处理的数据流进行连接（connect），就可以实时地更新配置进行计算了。
+
+这里定义一个“规则流”ruleStream，里面的数据表示了数据流 stream 处理的规则，规则的数据类型定义为 Rule
+
+需要先定义一个 MapStateDescriptor 来描述广播状态，然后传入 ruleStream.broadcast()得到广播流，接着用 stream 和广播流进行连接。这里状态描述器中的 key 类型为 String，就是为了区分不同的状态值而给定的 key 的名称。
+
+```java
+MapStateDescriptor<String, Rule> ruleStateDescriptor = new MapStateDescriptor<>(...);
+BroadcastStream<Rule> ruleBroadcastStream = ruleStream.broadcast(ruleStateDescriptor);
+DataStream<String> output =
+    stream.connect(ruleBroadcastStream)
+    	   .process( new BroadcastProcessFunction<>() {...} );
+```
+
+```java
+public abstract class BroadcastProcessFunction<IN1, IN2, OUT> extends BaseBroadcastProcessFunction {
+...
+ public abstract void processElement(IN1 value, ReadOnlyContext ctx, Collector<OUT> out) throws Exception;
+    
+ public abstract void processBroadcastElement(IN2 value, Context ctx, Collector<OUT> out) throws Exception;
+...
+}
+```
+
+processElement()方法，处理的是正常数据流
+
+* 第一个参数 value 就是当前到来的流数据
+* 第二个参数是上下文 ctx，可以调用.getBroadcastState()方法获取当前的广播状态，获取到的广播状态只能读取不能更改，“ 只 读 ” （ ReadOnly ）
+
+processBroadcastElement()方法就相当于是用来处理广播流的
+
+* 它的第一个参数 value（广播流中的规则或者配置数据。
+* 第二个参数是上下文 ctx，可以调用.getBroadcastState()方法获取当前的广播状态，可根据当前广播流中的数据更新状态。
+
+```java
+Rule rule = ctx.getBroadcastState( 
+    new MapStateDescriptor<>("rules", Types.String,Types.POJO(Rule.class))).get("my rule");
+```
+
+调用 ctx.getBroadcastState()方法，传入一个 MapStateDescriptor，就可以得到当前的叫作“rules”的广播状态
+
+调用它的.get()方法，就可以取出其中“my rule”对应的值进行计算处理。
+
+### 9.4.2 代码实例
+
+电商应用中，判断用户先后发生的行为的“组合模式”，比如“登录-下单”或者“登录-支付”，检测出这些连续的行为进行统计，了解平台的运用状况以及用户的行为习惯。
+
+```java
+package org.neptune.State;
+
+import org.apache.flink.api.common.state.BroadcastState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.BroadcastStream;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.co.KeyedBroadcastProcessFunction;
+import org.apache.flink.util.Collector;
+
+public class BroadcastStateExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        // 读取用户行为事件流
+        DataStreamSource<Action> actionStream = env.fromElements(
+                new Action("Alice", "login"),
+                new Action("Alice", "pay"),
+                new Action("Bob", "login"),
+                new Action("Bob", "buy")
+        );
+        // 定义行为模式流，代表了要检测的标准
+        DataStreamSource<Pattern> patternStream = env.fromElements(
+                        new Pattern("login", "pay"),
+                        new Pattern("login", "buy")
+                );
+        // 定义广播状态的描述器，创建广播流
+        MapStateDescriptor<Void, Pattern> bcStateDescriptor = new MapStateDescriptor<>(
+                "patterns", Types.VOID, Types.POJO(Pattern.class));
+        BroadcastStream<Pattern> bcPatterns = patternStream.broadcast(bcStateDescriptor);
+        // 将事件流和广播流连接起来，进行处理
+        DataStream<Tuple2<String, Pattern>> matches = actionStream
+                .keyBy(data -> data.userId)
+                .connect(bcPatterns)
+                .process(new PatternEvaluator());
+        matches.print();
+        env.execute();
+    }
+
+    public static class PatternEvaluator extends KeyedBroadcastProcessFunction
+            <String, Action, Pattern, Tuple2<String, Pattern>> {
+        // 定义一个值状态，保存上一次用户行为
+        ValueState<String> prevActionState;
+
+        @Override
+        public void open(Configuration conf) {
+            prevActionState = getRuntimeContext().getState(
+                new ValueStateDescriptor<>("lastAction", Types.STRING));
+        }
+
+        @Override
+        public void processBroadcastElement(
+                Pattern pattern,
+                Context ctx,
+                Collector<Tuple2<String, Pattern>> out) throws Exception {
+            BroadcastState<Void, Pattern> bcState = ctx.getBroadcastState(
+                    new MapStateDescriptor<>("patterns", Types.VOID,Types.POJO(Pattern.class)));
+            // 将广播状态更新为当前的 pattern
+            bcState.put(null, pattern);
+        }
+
+        @Override
+        public void processElement(Action action, ReadOnlyContext ctx,
+                                   Collector<Tuple2<String, Pattern>> out) throws Exception {
+            Pattern pattern = ctx.getBroadcastState(
+                    new MapStateDescriptor<>("patterns", Types.VOID,
+                            Types.POJO(Pattern.class))).get(null);
+            String prevAction = prevActionState.value();
+            if (pattern != null && prevAction != null) {
+                // 如果前后两次行为都符合模式定义，输出一组匹配
+                if (pattern.action1.equals(prevAction) &&
+                        pattern.action2.equals(action.action)) {
+                    out.collect(new Tuple2<>(ctx.getCurrentKey(), pattern));
+                }
+            }
+            // 更新状态
+            prevActionState.update(action.action);
+        }
+    }
+
+    // 定义用户行为事件 POJO 类
+    public static class Action {
+        public String userId;
+        public String action;
+
+        public Action() {
+        }
+
+        public Action(String userId, String action) {
+            this.userId = userId;
+            this.action = action;
+        }
+
+        @Override
+        public String toString() {
+            return "Action{" +
+                    "userId=" + userId +
+                    ", action='" + action + '\'' +
+                    '}';
+        }
+    }
+
+    // 定义行为模式 POJO 类，包含先后发生的两个行为
+    public static class Pattern {
+        public String action1;
+        public String action2;
+
+        public Pattern() {
+        }
+
+        public Pattern(String action1, String action2) {
+            this.action1 = action1;
+            this.action2 = action2;
+        }
+
+        @Override
+        public String toString() {
+            return "Pattern{" +
+                    "action1='" + action1 + '\'' +
+                    ", action2='" + action2 + '\'' +
+                    '}';
+        }
+    }
+}
+```
+
+将检测的行为模式定义为 POJO 类 Pattern，里面包含了连续的两个行为。由于广播状态中只保存了一个 Pattern，并不关心 MapState 中的 key，所以也可以直接将 key 的类型指定为 Void，具体值就是 null。
+
+在具体的操作过程中，将广播流中的 Pattern 数据保存为广播变量；
+
+在行为数据 Action 到来之后读取当前广播变量，确定行为模式，并将之前的一次行为保存为一个 ValueState——这是针对当前用户的状态保存，所以用到了 Keyed State。
+
+检测到如果前一次行为与 Pattern 中的 action1 相同，而当前行为与 action2 相同，则发现了匹配模式的一组行为，输出检测结果。
+
+## 9.5 状态持久化和状态后端
+
+Flink 对状态进行持久化的方式，是将当前所有分布式状态进行“快照”保存，写入一个“检查点”（checkpoint）或保存点（savepoint）保存到外部存储系统中。存储介质一般是分布式文件系统（distributed file system）。
+
+### 9.5.1 检查点（Checkpoint）
+
+有状态流应用中的检查点（checkpoint），是所有任务的状态在某个时间点的一个快照（一份拷贝）。
+
+* 检查点（checkpoint）
+  * 默认检查点关闭，需要手动开启，在代码中调用执行环境的.enableCheckpointing()方法就可以开启检查点。
+
+```java
+StreamExecutionEnvironment env = StreamExecutionEnvironment.getEnvironment();
+env.enableCheckpointing(1000);//传入的参数是检查点的间隔时间，单位为毫秒
+```
+
+* 保存点（savepoint）
+  * 原理和形式与检查点一样，也是状态持久化保存的一个快照保存点是自定义的镜像保存，不会由 Flink 自动创建，而需要用户手动触发。这在有计划地停止、重启应用时非常有用。
+
+### 9.5.2 状态后端（State Backends）
+
+在 Flink 中，状态的存储、访问以及维护，都是由一个可插拔的组件决定的，这个组件就叫作状态后端        （state backend）。状态后端主要负责两件事：一是本地的状态管理，二是将检查
+
+点（checkpoint）写入远程的持久化存储。
+
+检查点的保存：
+
+* 首先由 JobManager 向所有 TaskManager 发出触发检查点的命令；
+
+* TaskManger 收到之后，将当前任务的所有状态进行快照保存，持久化到远程的存储介质中；
+
+* 完成之后向 JobManager 返回确认信息。
+
+这个过程是分布式的，当 JobManger 收到所有TaskManager 的返回信息后，就会确认当前检查点成功保存
+
+![image-20221123165224710](../../images/image-20221123165224710.png)
+
+#### 9.5.2.1 状态后端的分类
+
+状态后端是一个“开箱即用”的组件，可以在不改变应用程序逻辑的情况下独立配置。默认的状态后端是 HashMapStateBackend
+
+##### 9.5.2.1.1 哈希表状态后端（HashMapStateBackend）
+
+* 把状态存放在内存里。具体实现上，哈希表状态后端在内部会直接把状态当作对象（objects），保存在 Taskmanager 的 JVM 堆（heap）上。普通的状态，以及窗口中收集的数据和触发器（triggers），都会以键值对（key-value）的形式存储起来，所以底层是一个哈希表（HashMap），这种状态后端也因此得名。
+
+* 对于检查点的保存，一般是放在持久化的分布式文件系统（file system）中，也可以通过配置“检查点存储”（CheckpointStorage）来另外指定。HashMapStateBackend 是将本地状态全部放入内存的，这样可以获得最快的读写速度，使计算性能达到最佳；代价则是内存的占用。
+
+* 它适用于具有大状态、长窗口、大键值状态的作业，对所有高可用性设置也是有效的。
+
+##### 9.5.2.1.2 内嵌 RocksDB 状态后端（EmbeddedRocksDBStateBackend）
+
+* RocksDB 是一种内嵌的 key-value 存储介质，可以把数据持久化到本地硬盘。配置EmbeddedRocksDBStateBackend 后，会将处理中的数据全部放入 RocksDB 数据库中，RocksDB默认存储在 TaskManager 的本地数据目录里。
+
+* 状态主要是放在RocksDB 中的。数据被存储为序列化的字节数组（Byte Arrays），读写操作需要序列化/反序列化，因此状态的访问性能要差一些。另外，因为做了序列化，key 的比较也会按照字节进行，而不是直接调用.hashCode()和.equals()方法。对于检查点，同样会写入到远程的持久化文件系统中。
+
+* EmbeddedRocksDBStateBackend 始终执行的是异步快照，不会因为保存检查点而阻塞数据的处理；而且它还提供了增量式保存检查点的机制，这在很多情况下可以大大提升保存效率。
+
+* 由于它会把状态数据落盘，而且支持增量化的检查点，所以在状态非常大、窗口非常长、键/值状态很大的应用场景中是一个好选择，同样对所有高可用性设置有效。
+
+#### 9.5.2.2 如何选择正确的状态后端
+
+HashMap 和 RocksDB 两种状态后端最大的区别，就在于本地状态存放在哪里：前者是内存，后者是 RocksDB
+
+* HashMapStateBackend 是内存计算
+  * 读写速度快
+  * 状态的大小会受到集群可用内存的限制
+
+* RocksDB 是硬盘存储，可以根据可用的磁盘空间进行扩展
+
+  * 读写慢
+
+  * 支持增量检查点，适用于超级海量状态的存储。
+
+#### 9.5.2.3 状态后端的配置
+
+默认状态后端是由集群配置文件 flink-conf.yaml 中指定的，配置的键名称为 state.backend。
+
+##### 9.5.2.3.1 配置默认的状态后端
+
+state.backend值的可选项为
+
+* hashmap
+* rocksdb
+* 一个实现了状态后端工厂StateBackendFactory 的类的完全限定类名。
+
+下面是一个配置 HashMapStateBackend 的例子
+
+state.checkpoints.dir 配置项，定义了状态后端将检查点和元数据写入的目录。
+
+```yaml
+# 默认状态后端
+state.backend: hashmap
+# 存放检查点的文件路径
+state.checkpoints.dir: hdfs://namenode:40010/flink/checkpoints
+```
+
+##### 9.5.2.3.2 为每个作业（Per-job）单独配置状态后端
+
+设置HashMapStateBackend
+
+```java
+StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+//设置HashMapStateBackend
+env.setStateBackend(new HashMapStateBackend());
+```
+
+设置 EmbeddedRocksDBStateBackend
+
+```xml
+StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+//设置 EmbeddedRocksDBStateBackend
+env.setStateBackend(new EmbeddedRocksDBStateBackend());
+```
+
+在 IDE 中使用 EmbeddedRocksDBStateBackend，需要为 Flink 项目添加依赖：
+
+```xml
+<dependency>
+ 	<groupId>org.apache.flink</groupId>
+ 	<artifactId>flink-statebackend-rocksdb_${scala.binary.version}</artifactId>
+ 	<version>1.13.0</version>
+</dependency>
+```
+
+Flink 发行版中默认就包含了 RocksDB，只要代码中没有使用 RocksDB的相关内容，就不需要引入这个依赖。
+
+即使我们在 flink-conf.yaml 配置文件中设定了state.backend 为 rocksdb，也可以直接正常运行，并且使用 RocksDB 作为状态后端。
 
