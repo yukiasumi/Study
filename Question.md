@@ -30,3 +30,22 @@ alter system kill session '上一步sid的值,上一步的serial#的值';
 
 ```
 
+## postgreSQL
+
+```plsql
+SQL 错误 [55000]: ERROR: cannot delete from table "xxxxx" because it does not have a replica identity and publishes updates
+Hint: To enable updating from the table, set REPLICA IDENTITY using ALTER TABLE.
+ 
+SQL 错误 [55000]: ERROR: cannot delete from table "xxxxx" because it does not have a replica identity and publishes deletes
+Hint: To enable deleting from the table, set REPLICA IDENTITY using ALTER TABLE.
+
+在数据库执行以下sql即可:
+ALTER TABLE xxxxx REPLICA IDENTITY FULL;
+```
+
+## Edge浏览器取消置顶
+
+```perl
+CTRL+AIT+ESC，若无效果，尝试关闭edge，重新打开
+```
+

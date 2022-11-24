@@ -7644,5 +7644,223 @@ bin/flink run -s :savepointPath [:runArgs]
 
 ## 10.3 端到端精确一次（end-to-end exactly-once）
 
+### 10.3.1 输入端保证
 
+输入端（Source）需要达到 at-least-once 一致性语义
 
+数据源可重放数据，或者说可重置读取数据偏移量，加上 Flink 的 Source 算子将偏移量作为状态保存进检查点，就可以保证数据不丢。
+
+### 10.3.2 输出端保证
+
+输出端（Sink）有两种写入方式：
+
+* 幂等写入（idempotent）
+  * 一个操作可以重复执行很多次，但只导致一次结果更改，后面再重复执行就不会对结果起作用了。
+  * 主要的限制在于外部存储系统必须支持这样的幂等写入：如 Redis 中键值存储，或者关系型数据库中满足查询条件的更新操作。
+
+* 事务写入（transactional）
+
+  * 预写日志（write-ahead-log，WAL）
+
+    DataStream API 提供了一个模板类GenericWriteAheadSink，用来实现这种事务型的写入方式
+
+    ①先把结果数据作为日志（log）状态保存起来
+
+    ②进行检查点保存时，也会将这些结果数据一并做持久化存储
+    
+    ③在收到检查点完成的通知时，将所有结果一次性写入外部系统。
+    
+    保存确认信息时出现了故障，Flink 最会认为没有成功写入，导致这批数据的重复写入
+    
+  * 两阶段提交（two-phase-commit，2PC）
+  
+    先做“预提交”，等检查点完成之后再正式提交，需要外部系统提供事务支持
+  
+    Flink 提供了 TwoPhaseCommitSinkFunction 接口，自定义实现两阶段提交的SinkFunction 
+  
+    ①当第一条数据到来时，或者收到检查点的分界线时，Sink 任务都会启动一个事务。
+  
+    ②接下来接收到的所有数据，都通过这个事务写入外部系统；这时由于事务没有提交，所以数据尽管写入了外部系统，但是不可用，是“预提交”的状态。
+  
+    ③当 Sink 任务收到 JobManager 发来检查点完成的通知时，正式提交事务，写入的结果就真正可用了。
+  
+    2PC 对外部系统的要求：
+  
+    * 外部系统必须提供事务支持，或者 Sink 任务必须能够模拟外部系统上的事务。
+  
+    * 在检查点的间隔期间里，必须能够开启一个事务并接受数据写入。
+  
+    * 在收到检查点完成的通知之前，事务必须是“等待提交”的状态。在故障恢复的情况下，这可能需要一些时间。如果这个时候外部系统关闭事务（例如超时了），那么未提交的数据就会丢失。
+  
+    * Sink 任务必须能够在进程失败后恢复事务。
+  
+    * 提交事务必须是幂等操作。也就是说，事务的重复提交应该是无效的。
+  
+
+具体在项目中的选型，应该一致性级别和处理性能权衡考量。
+
+### 10.3.3 Flink 和 Kafka 连接时的精确一次保证
+
+在流处理的应用中，最佳的数据源当然是可重置偏移量的消息队列了；
+
+它不仅可以提供数据重放的功能，而且天生就是以流的方式存储和处理数据的。
+
+#### 10.3.3.1 整体介绍
+
+1. Flink 内部
+
+   Flink 内部可以通过检查点机制保证状态和处理结果的 exactly-once 语义。
+
+2. 输入端
+
+   输入数据源端的 Kafka 可以对数据进行持久化保存，并可以重置偏移量（offset）。
+   
+   * 在 Source 任务（FlinkKafkaConsumer）中将当前读取的偏移量保存为算子状态，写入到检查点中；
+   * 当发生故障时，从检查点中读取恢复状态，并由连接器 FlinkKafkaConsumer 向 Kafka重新提交偏移量，就可以重新消费数据、保证结果的一致性了。
+
+3. 输出端
+
+   输出端保证 exactly-once 的最佳实现，两阶段提交（2PC）。
+
+   写入 Kafka 的过程实际上是一个两段式的提交：
+
+   * 处理完毕得到结果，写入Kafka 时是基于事务的“预提交”；
+
+   * 等到检查点保存完毕，才会提交事务进行“正式提交”。
+
+如果中间出现故障，事务进行回滚，预提交就会被放弃；恢复状态之后，也只能恢复所有已经确认提交的操作。
+
+   Flink 官方实现的 Kafka 连接器中，提供了写入到 Kafka 的 FlinkKafkaProducer，它就实现了 TwoPhaseCommitSinkFunction 接口：
+
+   ```java
+   public class FlinkKafkaProducer<IN> extends TwoPhaseCommitSinkFunction <IN,FlinkKafkaProducer.KafkaTransactionState,FlinkKafkaProducer.KafkaTransactionContext> {
+   ...
+   }
+   ```
+
+   #### 10.3.3.2 具体步骤
+
+Flink 从 Kafka 读取数据、并将处理结果写入 Kafka
+
+![image-20221124201105158](../../images/image-20221124201105158.png)
+
+Flink 与 Kafka 连接的两阶段提交，离不开检查点的配合，这个过程需要 JobManager 协调各个 TaskManager 进行状态快照，而检查点具体存储位置则是由状态后端（State Backend）来配置管理的。一般情况，我们会将检查点存储到分布式文件系统上。
+
+实现端到端 exactly-once 的具体过程可以分解如下：
+
+1. 启动检查点保存
+
+检查点保存的启动，标志着我们进入了两阶段提交协议的“预提交”阶段
+
+JobManager 通知各个 TaskManager 启动检查点保存，Source 任务会将检查点分界线（barrier）注入数据流
+
+这个 barrier 可以将数据流中的数据，分为进入当前检查点的集合和进入下一个检查点的集合
+
+![image-20221124201243748](../../images/image-20221124201243748.png)
+
+2. 算子任务对状态做快照
+
+分界线（barrier）会在算子间传递下去。每个算子收到 barrier 时，会将当前的状态做个快照，保存到状态后端。
+
+![image-20221124201424584](../../images/image-20221124201424584.png)
+
+Source 任务将 barrier 插入数据流后，也会将当前读取数据的偏移量作为状态写入检查点，存入状态后端；
+
+然后把 barrier 向下游传递，自己就可以继续读取数据了。
+
+接下来 barrier 传递到了内部的 Window 算子，它同样会对自己的状态进行快照保存，写入远程的持久化存储。
+
+3. Sink 任务开启事务，进行预提交
+
+![image-20221124201541575](../../images/image-20221124201541575.png)
+
+分界线（barrier）终于传到了 Sink 任务，这时 Sink 任务会开启一个事务。
+
+接下来到来的所有数据，Sink 任务都会通过这个事务来写入 Kafka。
+
+ barrier 是检查点的分界线，也是事务的分界线。之前的检查点可能尚未完成，因此上一个事务也可能尚未提交
+
+此时 barrier 的到来开启了新的事务，上一个事务尽管可能没有被提交，但也不再接收新的数据了。
+
+对于 Kafka 而言，提交的数据会被标记为“未确认”（uncommitted）。即“预提交”（pre-commit）。
+
+4. 检查点保存完成，提交事务
+
+当所有算子的快照都完成，即检查点保存最终完成时，JobManager 会向所有任务发确认通知，告诉大家当前检查点已成功保存
+
+![image-20221124201824885](../../images/image-20221124201824885.png)
+
+当 Sink 任务收到确认通知后，就会正式提交之前的事务，把之前“未确认”的数据标为“已确认”，接下来就可以正常消费了。
+
+在任务运行中的任何阶段失败，都会从上一次的状态恢复，所有没有正式提交的数据也会回滚。
+
+如此，Flink 和 Kafka 连接构成的流处理系统，就实现了端到端的 exactly-once 状态一致性。
+
+#### 10.3.3.3 需要的配置
+
+实现真正的端到端 exactly-once，还需要有一些额外的配置：
+
+* 必须启用检查点；
+* 在 FlinkKafkaProducer 的构造函数中传入参数 Semantic.EXACTLY_ONCE；
+* 配置 Kafka 读取数据的消费者的隔离级别
+这里所说的 Kafka，是写入的外部系统。预提交阶段数据已经写入，只是被标记为“未提
+交”（uncommitted），而 Kafka 中默认的隔离级别 isolation.level 是 read_uncommitted，也就是
+可以读取未提交的数据。这样一来，外部应用就可以直接消费未提交的数据，对于事务性的保
+证就失效了。所以应该将隔离级别配置为 read_committed，表示消费者遇到未提交的消息时，会停止从分区中消费数据，直到消息被标记为已提交才会再次恢复消费。当然，这样做的话，外部应用消费数据就会有显著的延迟。
+* 事务超时配置
+Flink 的 Kafka连接器中配置的事务超时时间 transaction.timeout.ms 默认是 1小时，而Kafka
+集群配置的事务最大超时时间 transaction.max.timeout.ms 默认是 15 分钟。所以在检查点保存
+时间很长时，有可能出现 Kafka 已经认为事务超时了，丢弃了预提交的数据；而 Sink 任务认
+为还可以继续等待。如果接下来检查点保存成功，发生故障后回滚到这个检查点的状态，这部
+分数据就被真正丢掉了。所以这两个超时时间，前者应该小于等于后者。
+
+# 11 Table API 和 SQL
+
+![image-20221124203846527](../../images/image-20221124203846527.png)
+
+Flink 是批流统一的处理框架，无论是批处理（DataSet API）还是流处理（DataStream API），在上层应用中都可以直接使用 Table API 或者 SQL 来实现；这两种 API 对于一张表执行相同的查询操作，得到的结果是完全一样的。
+
+目前最新的 1.13 版本中，Table API 和 SQL 也依然不算稳定，接口用法还在不停调整和更新。所以这部分重在理解原理和基本用法，具体的 API 调用可以随时关注官网的更新变化。
+
+## 11.1 快速上手
+
+### 11.1.1 需要引入的依赖
+
+ 添加Java “桥接器”（bridge），主要就是负责 Table API 和下层 DataStream API 的连接支持
+
+```xml
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-api-java-bridge_${scala.binary.version}</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+```
+
+添加Table API 的核心组件“计划器”（planner）
+
+Table API 的内部实现上，部分代码是 Scala ，还需要额外添加一个 Scala 版流处理的相关依赖
+
+```xml
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-planner-blink_${scala.binary.version}</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-streaming-scala_${scala.binary.version}</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+```
+
+想实现自定义的数据格式来做序列化，可以引入下面的依赖
+
+```xml
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-table-common</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+```
+
+### 11.1.2 简单示例
