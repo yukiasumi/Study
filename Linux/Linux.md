@@ -164,15 +164,14 @@ c	字型装置文件
 ls -l|grep -A3 -B4 test 打印关键字前四行后三行
 ```
 * awk 规则 文件名	指定行列规则输出文本
-	* ```
+	 ```
 	  * 用法一：awk '{print $1,$4}' log.txt 【每行空格或TAB分割，输出文本中的1、4 列】
 	  * 用法二：awk -F, '{print $1,$2}' log.txt 【使用","[逗号]分割】
 	  * 用法三：awk -F '[ ,]'  '{print $1,$2,$5}' log.txt 先用空格分割，再用逗号分割
 	  * 用法四： awk -va=1 '{print $1,$1+a}' log.txt  设置参数a=1
 	  * 用法五:awk '{print $NF}' file1.txt  输出最后一列 【$(NF-1)倒数第二列】
 	  * 用法六:   awk 'NR==2{print $3}' file1.txt 输出第二行第三列
-	  
-	  ```
+	```
 	
 	
 	  ```shell
@@ -338,10 +337,10 @@ basename命令用于打印目录或者文件的基本名称，显示最后的目
 ​	```
 ​	* diff two different command outputs
 ​	
-	```
-	diff -urN <(command1 arg1) <(command2 arg1 arg2)
-	vimdiff <(command1 arg1) <(command2 arg1 arg2)
-	```
+​	```
+​	diff -urN <(command1 arg1) <(command2 arg1 arg2)
+​	vimdiff <(command1 arg1) <(command2 arg1 arg2)
+​	```
 
 * git commod
 

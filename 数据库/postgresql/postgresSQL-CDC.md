@@ -43,6 +43,8 @@ psql
 create user test_user with password 'abc123';            // 创建用户
 create database test_db owner test_user;                 // 创建数据库，建库如果不指定owner，那么默认是postgres
 grant all privileges on database test_db to test_user;   // 授权。
+
+ALTER TABLE xxxxx REPLICA IDENTITY FULL; //如不执行，开启采集后无法操作表，还得执行一次
 ```
 
 ### 远程访问
@@ -90,7 +92,7 @@ Debezium使用PostgreSQL的逻辑解码，它使用主从复制slot。slot保证
 
 ```plsql
 alter role cdcuser replication login;
-
+grant create on database test_db to cdcuser
 
 --------------------------------------------------------------------------以下不需要
 CREATE ROLE CDC;
