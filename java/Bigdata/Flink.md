@@ -8719,3 +8719,1141 @@ DataStream 中并没有 key 的定义，所以只能通过两条消息一减一�
 
 ### 11.4.1 事件时间
 
+为了处理无序事件，并区分流中的迟到事件。Flink 需要从事件数据中提取时间戳，并生成水位线，用来推进事件时间的进展。
+
+事件时间属性可以在创建表 DDL 中定义，也可以在数据流和表的转换中定义。
+
+#### 11.4.1.1 在创建表的 DDL 中定义
+
+在创建表的 DDL（CREATE TABLE 语句）中，可以增加一个字段，通过 WATERMARK语句来定义事件时间属性。
+
+WATERMARK 语句主要用来定义水位线（watermark）的生成表达式，这个表达式会将带有事件时间戳的字段标记为事件时间属性，并在它基础上给出水位线的延迟时间。具体定义方式如下：
+
+```sql
+CREATE TABLE EventTable(
+ user STRING,
+ url STRING,
+ ts TIMESTAMP(3),
+ WATERMARK FOR ts AS ts - INTERVAL '5' SECOND
+) WITH (
+ ...
+);
+```
+
+这里把 ts 字段定义为事件时间属性，而且基于 ts 设置了 5 秒的水位线延迟。这里的“5 秒”是以“时间间隔”的形式定义的，格式是 INTERVAL <数值> <时间单位>：`INTERVAL '5' SECOND`，这里的数值必须用单引号引起来，而单位用 SECOND 和 SECONDS 是等效的。
+
+Flink 中支持的事件时间属性数据类型必须为 TIMESTAMP 或者 TIMESTAMP_LTZ。
+
+TIMESTAMP_LTZ 是指带有本地时区信息的时间戳（TIMESTAMP WITH LOCAL TIME ZONE）；
+
+一般情况下如果数据中的时间戳是“年-月-日-时-分-秒”的形式，那就是不带时区信息的，可以将事件时间属性定义为 TIMESTAMP 类型。
+
+如果原始的时间戳就是一个长整型的毫秒数，这时就需要另外定义一个字段来表示事件时间属性，类型定义为 TIMESTAMP_LTZ 会更方便：
+
+```sql
+CREATE TABLE events (
+ user STRING,
+ url STRING,
+ ts BIGINT,
+ ts_ltz AS TO_TIMESTAMP_LTZ(ts, 3),
+ WATERMARK FOR ts_ltz AS time_ltz - INTERVAL '5' SECOND
+) WITH (
+ ...
+);
+```
+
+这里另外定义了一个字段 ts_ltz，是把长整型的 ts 转换为 TIMESTAMP_LTZ 得到的；
+
+使用 WATERMARK 语句将它设为事件时间属性，并设置 5 秒的水位线延迟。
+
+#### 11.4.1.2 在数据流转换为表时定义
+
+事件时间属性也可以在将 DataStream 转换为表的时候来定义。
+
+调用 fromDataStream()方法创建表时，可以追加参数来定义表中的字段结构；这时可以给某个字段加上.rowtime() 后缀，就表示将当前字段指定为事件时间属性。这个字段可以是数据中本不存在、额外追加上去的“逻辑字段”，就像之前 DDL 中定义的第二种情况；也可以是本身固有的字段，那么这个字段就会被事件时间属性所覆盖，类型也会被转换为 TIMESTAMP。不论那种方式，时间属性字段中保存的都是事件的时间戳（TIMESTAMP 类型）。
+
+这种方式只负责指定时间属性，而时间戳的提取和水位线的生成应该之前就在 DataStream 上定义好了。由于 DataStream 中没有时区概念，因此 Flink 会将事件时间属性解析成不带时区的 TIMESTAMP 类型，所有的时间值都被当作 UTC 标准时间。
+
+在代码中的定义方式如下：
+
+```java
+	// 方法一:
+	// 流中数据类型为二元组 Tuple2，包含两个字段；需要自定义提取时间戳并生成水位线
+	DataStream<Tuple2<String, String>> stream = inputStream.assignTimestampsAndWatermarks(...);
+	// 声明一个额外的逻辑字段作为事件时间属性
+	Table table = tEnv.fromDataStream(stream, $("user"), $("url"), $("ts").rowtime());
+
+	// 方法二:
+	// 流中数据类型为三元组 Tuple3，最后一个字段就是事件时间戳
+	DataStream<Tuple3<String, String, Long>> stream = inputStream.assignTimestampsAndWatermarks(...);
+	// 不再声明额外字段，直接用最后一个字段作为事件时间属性
+	Table table = tEnv.fromDataStream(stream, $("user"), $("url"), $("ts").rowtime());
+```
+
+### 11.4.2 处理时间
+
+处理时间就比较简单了，是系统时间，使用时不需要提取时间戳（timestamp）和生成水位线（watermark）
+
+在定义处理时间属性时，必须要额外声明一个字段，专门用来保存当前的处理时间。
+
+处理时间属性的定义也有两种方式：创建表 DDL 中定义，或者在数据流转换成表时定义。
+
+#### 11.4.2.1 在创建表的 DDL 中定义
+
+在创建表的 DDL（CREATE TABLE 语句）中，增加一个额外的字段，通过调用系统内置的 PROCTIME()函数来指定当前的处理时间属性，返回的类型是 TIMESTAMP_LTZ。
+
+```sql
+CREATE TABLE EventTable(
+ user STRING,
+ url STRING,
+ ts AS PROCTIME()
+) WITH (
+ ...
+);
+```
+
+这里的时间属性，其实是以“计算列”（computed column）的形式定义出来的。
+
+计算列是 Flink SQL 中引入的特殊概念，可以用一个 AS 语句来在表中产生数据中不存在的列，并且可以利用原有的列、各种运算符及内置函数。在事件时间属性的定义中，将 ts 字段转换成 TIMESTAMP_LTZ 类型的 ts_ltz，也是计算列的定义方式。
+
+#### 11.4.2.2 在数据流转换为表时定义
+
+处理时间属性同样可以在将DataStream转换为表的时候来定义。调用fromDataStream()方法创建表时，可以用.proctime()后缀来指定处理时间属性字段。由于处理时间是系统时间，原始数据中并没有这个字段，所以处理时间属性一定不能定义在一个已有字段上，只能定义在表结构所有字段的最后，作为额外的逻辑字段出现。
+代码中定义处理时间属性的方法如下：
+
+```sql
+DataStream<Tuple2<String, String>> stream = ...;
+// 声明一个额外的字段作为处理时间属性字段
+Table table = tEnv.fromDataStream(stream, $("user"), $("url"), $("ts").proctime());
+```
+
+### 11.4.3 窗口（Window）
+
+有了时间属性，接下来就可以定义窗口进行计算了，窗口可以将无界流切割成大小有限的“桶”（bucket）来做计算，通过截取有限数据集来处理无限的流数据。
+
+在 DataStream API 中提供了对不同类型的窗口进行定义和处理的接口，而在 Table API 和 SQL 中，类似的功能也都可以实现。
+
+#### 11.4.3.1 分组窗口（Group Window，老版本）
+
+Flink 1.12 之前的版本中，Table API 和 SQL 提供了一组“分组窗口”（Group Window）函数，常用的时间窗口如滚动窗口、滑动窗口、会话窗口都有对应的实现；
+
+具体在 SQL 中就是调用 TUMBLE()、HOP()、SESSION()，传入时间属性字段、窗口大小等参数就可以了。
+
+以滚动窗口为例：
+
+```sql
+TUMBLE(ts, INTERVAL '1' HOUR)
+```
+
+这里的ts 是定义好的时间属性字段，窗口大小用“时间间隔”INTERVAL 来定义。
+
+在进行窗口计算时，分组窗口是将窗口本身当作一个字段对数据进行分组的，可以对组内的数据进行聚合。
+
+使用方式如下：
+
+```java
+	Table result = tableEnv.sqlQuery(
+	 	"SELECT " +
+	 	"user, " +
+		"TUMBLE_END(ts, INTERVAL '1' HOUR) as endT, " +
+		"COUNT(url) AS cnt " +
+	 	"FROM EventTable " +
+	 	"GROUP BY " + // 使用窗口和用户名进行分组
+	 	"user, " +
+	 	"TUMBLE(ts, INTERVAL '1' HOUR)" // 定义 1 小时滚动窗口
+	 );
+```
+
+这里定义了 1 小时的滚动窗口，将窗口和用户 user 一起作为分组的字段。用聚合函数COUNT()对分组数据的个数进行了聚合统计，并将结果字段重命名为cnt；用TUPMBLE_END()函数获取滚动窗口的结束时间，重命名为 endT 提取出来。
+
+分组窗口的功能比较有限，只支持窗口聚合，所以目前已经处于弃用（deprecated）的状态。
+
+#### 11.4.3.2 窗口表值函数（Windowing TVFs，新版本）
+
+Flink1.13 版本开始，使用窗口表值函数（Windowing table-valued functions，Windowing TVFs）来定义窗口。
+
+窗口表值函数是 Flink 定义的多态表函数（PTF），可以将表进行扩展后返回。表函数（table function）可以看作是返回一个表的函数
+
+目前 Flink 提供了以下几个窗口 TVF：
+
+* 滚动窗口（Tumbling Windows）；
+
+* 滑动窗口（Hop Windows，跳跃窗口）；
+
+* 累积窗口（Cumulate Windows）；
+
+* 会话窗口（Session Windows，目前尚未完全支持）。
+
+窗口表值函数可以完全替代传统的分组窗口函数。窗口 TVF 更符合 SQL 标准，性能得到了优化，拥有更强大的功能；可以支持基于窗口的复杂计算，例如窗口 Top-N、窗口联结（window join）等等。目前窗口 TVF 的功能还不完善，会话窗口和很多高级功能还不支持，不过正在快速地更新完善。在未来的版本中，窗口 TVF 将越来越强大，将会是窗口处理的唯一入口。
+
+在窗口 TVF 的返回值中，除去原始表中的所有列，还增加了用来描述窗口的额外 3 个列：
+
+* 窗口起始点（window_start）
+* 窗口结束点（window_end）
+* 窗口时间（window_time）：指窗口中的时间属性，它的值等于window_end - 1ms，相当于窗口中能够包含数据的最大时间戳。
+
+在 SQL 中的声明方式，与以前的分组窗口是类似的，直接调用 TUMBLE()、HOP()、CUMULATE()就可以实现滚动、滑动和累积窗口，不过传入的参数会有所不同。
+
+##### 11.4.3.2.1 滚动窗口（TUMBLE）
+
+滚动窗口在 SQL 中的概念与 DataStream API 中的定义完全一样，是长度固定、时间对齐、无重叠的窗口，一般用于周期性的统计计算。
+
+在 SQL 中通过调用 TUMBLE()函数就可以声明一个滚动窗口，只有一个核心参数就是窗口大小（size）。在 SQL 中不考虑计数窗口，所以滚动窗口就是滚动时间窗口，参数中还需要将当前的时间属性字段传入；另外，窗口 TVF 本质上是表函数，可以对表进行扩展，所以还应该把当前查询的表作为参数整体传入。具体声明如下：
+
+```sql
+TUMBLE(TABLE EventTable, DESCRIPTOR(ts), INTERVAL '1' HOUR)
+```
+
+这里基于时间字段 ts，对表 EventTable 中的数据开了大小为 1 小时的滚动窗口。窗口会将表中的每一行数据，按照它们 ts 的值分配到一个指定的窗口中。
+
+##### 11.4.3.2.2 滑动窗口（HOP）
+
+滑动窗口的使用与滚动窗口类似，可以通过设置滑动步长来控制统计输出的频率。
+
+在 SQL中通过调用 HOP()来声明滑动窗口；除了也要传入表名、时间属性外，还需要传入窗口大小（size）和滑动步长（slide）两个参数。
+
+```sql
+HOP(TABLE EventTable, DESCRIPTOR(ts), INTERVAL '5' MINUTES, INTERVAL '1' HOURS));
+```
+
+这里基于时间属性 ts，在表 EventTable 上创建了大小为 1 小时的滑动窗口，每 5 分钟滑动一次。需要注意的是，紧跟在时间属性字段后面的第三个参数是步长（slide），第四个参数才是窗口大小（size）。
+
+##### 11.4.3.2.3 累积窗口（CUMULATE）
+
+统计周期较长时，希望中间每隔一段时间就输出一次当前的统计值；与滑动窗口不同的是，在一个统计周期内，会多次输出统计值，它们应该是不断叠加累积的。
+
+例如，按天来统计网站的 PV（Page View，页面浏览量），如果用 1 天的滚动窗口那需要到每天 24 点才会计算一次，输出频率太低；如果用滑动窗口，计算频率可以更高，但统计的就变成了“过去 24 小时的 PV”。所以我们真正希望的是，还是按照自然日统计每天的PV，不过需要每隔 1 小时就输出一次当天到目前为止的 PV 值。这种特殊的窗口就叫作“累积窗口”（Cumulate Window）。
+
+累积窗口是窗口 TVF 中新增的窗口功能，它会在一定的统计周期内进行累积计算。累积窗口中有两个核心的参数：
+
+* 最大窗口长度（max window size）：统计周期，最终目的就是统计这段时间内的数据
+* 累积步长（step）
+
+![image-20221126143135369](../../images/image-20221126143135369.png)
+
+开始时，创建的第一个窗口大小就是步长 step；之后的每个窗口都会在之前的基础上再扩展 step 的长度，直到达到最大窗口长度。在 SQL 中可以用 CUMULATE()函数来定义
+
+```sql
+CUMULATE(TABLE EventTable, DESCRIPTOR(ts), INTERVAL '1' HOURS, INTERVAL '1' DAYS))
+```
+
+这里基于时间属性 ts，在表 EventTable 上定义了一个统计周期为 1 天、累积步长为 1小时的累积窗口。
+
+第三个参数为步长 step，第四个参数则是最大窗口长度。
+
+上面所有的语句只是定义了窗口，类似于 DataStream API 中的窗口分配器；在 SQL 中窗口的完整调用，还需要配合聚合操作和其它操作。
+
+## 11.5 聚合（Aggregation）查询
+
+Flink 中的 SQL 是流处理与标准 SQL 结合的产物，所以聚合查询也可以分成两种：流处理中特有的聚合（主要指窗口聚合），以及 SQL 原生的聚合查询方式。
+
+### 11.5.1 分组聚合
+
+分组聚合：多对一的转换，多条输入数据进行计算，得到一个唯一的值
+
+```java
+//计算输入数据的个数
+Table eventCountTable = tableEnv.sqlQuery("select COUNT(*) from EventTable");
+```
+
+```sql
+--按照用户名进行分组，统计每个用户点击 url 的次数：
+SELECT user, COUNT(url) as cnt FROM EventTable GROUP BY user
+```
+
+SQL 中的分组聚合可以对应 DataStream API 中 keyBy 之后的聚合转换，它们都是按照某个 key 对数据进行了划分，各自维护状态来进行聚合统计的。
+
+在流处理中，分组聚合同样是一个持续查询，而且是一个更新查询，得到的是一个动态表；因此，想要将结果表转换成流或输出到外部系统，必须采用撤回流（retract stream）或更新插入流（upsert stream）的编码方式；如果在代码中直接转换成 DataStream 打印输出，需要调用 toChangelogStream()。
+
+在持续查询的过程中，由于用于分组的 key 可能会不断增加，因此计算结果所需要维护的状态也会持续增长。为了防止状态无限增长耗尽资源，Flink Table API 和 SQL 可以在表环境中配置状态的生存时间（TTL）：
+
+```java
+	TableEnvironment tableEnv = ...
+	// 获取表环境的配置
+	TableConfig tableConfig = tableEnv.getConfig();
+	// 配置状态保持时间
+	tableConfig.setIdleStateRetention(Duration.ofMinutes(60));
+```
+
+也可以直接设置配置项 table.exec.state.ttl：
+
+```java
+TableEnvironment tableEnv = ...
+Configuration configuration = tableEnv.getConfig().getConfiguration();
+configuration.setString("table.exec.state.ttl", "60 min");
+```
+
+这两种方式是等效的。配置 TTL 有可能会导致统计结果不准确，这是以牺牲正确性为代价换取了资源的释放。
+
+此外，在 Flink SQL 的分组聚合中同样可以使用 DISTINCT 进行去重的聚合处理；可以使用 HAVING 对聚合结果进行条件筛选；还可以使用 GROUPING SETS（分组集）设置多个分组情况分别统计。。
+
+分组聚合既是 SQL 原生的聚合查询，也是流处理中的聚合操作，这是实际应用中最常见的聚合方式。当然，使用的聚合函数一般都是系统内置的，如果希望实现特殊需求也可以进行自定义。
+
+### 11.5.2 窗口聚合
+
+在 Flink 的 Table API 和 SQL 中，窗口的计算是通过“窗口聚合”（window aggregation）来实现的
+
+窗口聚合时，需要将窗口信息作为分组 key 的一部分定义出来。
+
+在 Flink 1.12 版本之前，是直接把窗口自身作为分组 key 放在GROUP BY 之后的，所以也叫“分组窗口聚合”；
+
+1.13 版本开始使用了“窗口表值函数”（Windowing TVF），窗口本身返回的是就是一个表，所以窗口会出现在FROM后面，GROUP BY 后面的则是窗口新增的字段 window_start 和 window_end。
+
+用窗口 TVF 实现分组窗口的聚合：
+
+```java
+	Table result = tableEnv.sqlQuery(
+ 	  "SELECT " +
+	 "user, " +
+	 "window_end AS endT, " +
+	 "COUNT(url) AS cnt " +
+	 "FROM TABLE( " +
+	 "TUMBLE( TABLE EventTable, " +
+	 "DESCRIPTOR(ts), " +
+	 "INTERVAL '1' HOUR)) " +
+	 "GROUP BY user, window_start, window_end "
+	 );
+```
+
+这里以 ts 作为时间属性字段、基于 EventTable 定义了 1 小时的滚动窗口，希望统计出每小时每个用户点击 url 的次数。用来分组的字段是用户名 user，以及表示窗口的window_start 和 window_end；而 TUMBLE()是表值函数，所以得到的是一个表（Table），聚合查询就是在这个 Table 中进行的
+
+Flink SQL 目前提供了滚动窗口 TUMBLE()、滑动窗口 HOP()和累积窗口（CUMULATE）三种表值函数（TVF）。在具体应用中，我们还需要提前定义好时间属性。
+
+以累积窗口为例：
+
+```java
+package org.neptune.TableAPIAndSQL;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.neptune.pojo.Event;
+
+import static org.apache.flink.table.api.Expressions.$;
+
+public class CumulateWindowExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        // 读取数据源，并分配时间戳、生成水位线
+        SingleOutputStreamOperator<Event> eventStream = env
+                .fromElements(
+                        new Event("Alice", "./home", 1000L),
+                        new Event("Bob", "./cart", 1000L),
+                        new Event("Alice", "./prod?id=1", 25 * 60 * 1000L),
+                        new Event("Alice", "./prod?id=4", 55 * 60 * 1000L),
+                        new Event("Bob", "./prod?id=5", 3600 * 1000L + 60 * 1000L),
+                        new Event("Cary", "./home", 3600 * 1000L + 30 * 60 * 1000L),
+                        new Event("Cary", "./prod?id=7", 3600 * 1000L + 59 * 60 * 1000L)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy.<Event>forMonotonousTimestamps()
+                                .withTimestampAssigner(new SerializableTimestampAssigner<Event>() {
+                                    @Override
+                                    public long extractTimestamp(Event element, long recordTimestamp) {
+                                        return element.timestamp;
+                                    }
+                                })
+                );
+        // 创建表环境
+        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+        // 将数据流转换成表，并指定时间属性
+        Table eventTable = tableEnv.fromDataStream(
+                eventStream,
+                $("user"),
+                $("url"),
+                $("timestamp").rowtime().as("ts")
+        );
+        // 为方便在 SQL 中引用，在环境中注册表 EventTable
+        tableEnv.createTemporaryView("EventTable", eventTable);
+        // 设置累积窗口，执行 SQL 统计查询
+        Table result = tableEnv
+                .sqlQuery(
+                        "SELECT " +
+                                "user, " +
+                                "window_end AS endT, " +
+                                "COUNT(url) AS cnt " +
+                                "FROM TABLE( " +
+                                "CUMULATE( TABLE EventTable, " + // 定义累积窗口
+                                "DESCRIPTOR(ts), " +
+                                "INTERVAL '30' MINUTE, " + //累积间隔为 30 分钟
+                                "INTERVAL '1' HOUR)) " + //统计周期为 1 小时
+                                "GROUP BY user, window_start, window_end "
+                );
+        tableEnv.toDataStream(result).print();
+        env.execute();
+    }
+}
+```
+
+与分组聚合不同，窗口聚合不会将中间聚合的状态输出，只会最后输出一个结果。
+
+除了应用简单的聚合函数、提取窗口开始时间（window_start）和结束时间(window_end)之外，窗口 TVF 还提供了一个 window_time 字段，用于表示窗口中的时间属性；这样就可以方便地进行窗口的级联（cascading window）和计算了。另外，窗口 TVF 还支持 GROUPING SETS，极大地扩展了窗口的应用范围。
+
+基于窗口的聚合，是流处理中聚合统计的一个特色，也是与标准 SQL 最大的不同之处。在实际项目中，很多统计指标其实都是基于时间窗口来进行计算的，所以窗口聚合是 Flink SQL中非常重要的功能；
+
+基于窗口 TVF 的聚合未来也会有更多功能的扩展支持，比如窗口 Top N、会话窗口、窗口联结等等。
+
+### 11.5.3 开窗（Over）聚合
+
+在标准 SQL 中还有另外一类比较特殊的聚合方式，可以针对每一行计算一个聚合值。
+
+以每一行数据为基准，计算它之前 1 小时内所有数据的平均值；也可以计算它之前 10 个数的平均值。就好像是在每一行上打开了一扇窗户、收集数据进行统计一样，这就是所谓的“开窗函数”。
+
+开窗函数是对每行都要做一次开窗聚合，因此聚合之后表中的行数不会有任何减少，是一个“多对多”的关系。
+
+与标准 SQL 中一致，Flink SQL 中的开窗函数也是通过 OVER 子句来实现的，所以有时开窗聚合也叫作“OVER 聚合”（Over Aggregation）。基本语法如下：
+
+```sql
+SELECT
+ <聚合函数> OVER (
+ [PARTITION BY <字段 1>[, <字段 2>, ...]]
+ ORDER BY <时间属性字段>
+ <开窗范围>),
+ ...
+FROM ...
+```
+
+这里 OVER 关键字前面是一个聚合函数，它会应用在后面 OVER 定义的窗口上。
+
+OVER子句中主要有以下几个部分：
+
+* PARTITION BY（可选）
+
+用来指定分区的键（key），类似于 GROUP BY 的分组，这部分是可选的；
+
+* ORDER BY
+
+OVER 窗口是基于当前行扩展出的一段数据范围，选择的标准可以基于时间也可以基于数量。不论哪种定义，数据都应该是以某种顺序排列好的；而表中的数据本身是无序的。所以在OVER 子句中必须用 ORDER BY 明确地指出数据基于那个字段排序。在 Flink 的流处理中，目前==只支持按照时间属性的升序排列==，所以这里 ORDER BY 后面的字段必须是定义好的时间属性。
+
+* 开窗范围
+
+对于开窗函数而言，还有一个必须要指定的就是开窗的范围，也就是到底要扩展多少行来做聚合。这个范围是由 BETWEEN <下界> AND <上界> 来定义的，也就是“从下界到上界”的范围。目前支持的上界只能是 CURRENT ROW，也就是定义一个“从之前某一行到当前行”的范围，所以一般的形式为：
+
+```sql
+BETWEEN ... PRECEDING AND CURRENT ROW
+```
+
+开窗选择的范围可以基于时间，也可以基于数据的数量。所以开窗范围还应该在两种模式之间做出选择：范围间隔（RANGE intervals）和行间隔（ROW intervals）。
+
+* 范围间隔
+
+范围间隔以 RANGE 为前缀，就是基于 ORDER BY 指定的时间字段去选取一个范围，一般就是当前行时间戳之前的一段时间。例如开窗范围选择当前行之前 1 小时的数据：
+
+```sql
+RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW
+```
+
+* 行间隔
+
+行间隔以 ROWS 为前缀，就是直接确定要选多少行，由当前行出发向前选取就可以了。例如开窗范围选择当前行之前的 5 行数据（最终聚合会包括当前行，所以一共 6 条数据）：
+
+```sql
+ROWS BETWEEN 5 PRECEDING AND CURRENT ROW
+```
+
+具体示例：
+
+```sql
+SELECT user, ts,
+ COUNT(url) OVER (
+ PARTITION BY user
+ ORDER BY ts
+ RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW
+ ) AS cnt
+FROM EventTable
+```
+
+这里以 ts 作为时间属性字段，对 EventTable 中的每行数据都选取它之前 1 小时的所有数据进行聚合，统计每个用户访问 url 的总次数，并重命名为 cnt。最终将表中每行的 user，ts 以及扩展出 cnt 提取出来。
+
+整个开窗聚合的结果，是对每一行数据都有一个对应的聚合值，因此就像将表中扩展出了一个新的列一样。由于聚合范围上界只能到当前行，新到的数据一般不会影响之前数据的聚合结果，所以结果表只需要不断插入（INSERT）就可以了。
+
+开窗聚合与窗口聚合（窗口 TVF 聚合）本质上不同，不过也还是有一些相似之处的：它们都是在无界的数据流上划定了一个范围，截取出有限数据集进行聚合统计；这其实都是“窗口”的思路。
+
+在 Table API 中定义了两类窗口：分组窗口（GroupWindow）和开窗窗口（OverWindow）；
+
+==在 SQL 中，也可以用 WINDOW 子句来在 SELECT 外部单独定义一个 OVER 窗口：==
+
+```sql
+SELECT user, ts,
+ COUNT(url) OVER w AS cnt,
+  MAX(CHAR_LENGTH(url)) OVER w AS max_url
+FROM EventTable
+WINDOW w AS (
+ PARTITION BY user
+ ORDER BY ts
+ ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)
+```
+
+上面的 SQL 中定义了一个选取之前 2 行数据的 OVER 窗口，并重命名为 w；接下来就可以基于它调用多个聚合函数，扩展出更多的列提取出来。比如这里除统计 url 的个数外，还统计了 url 的最大长度：首先用 CHAR_LENGTH()函数计算出 url 的长度，再调用聚合函数 MAX()进行聚合统计。这样，就可以方便重复引用定义好的 OVER 窗口了，大大增强了代码的可读性。
+
+### 11.5.4 应用实例 —— Top N
+
+Top N 聚合字面意思是“最大 N 个”，这只是一个泛称，它不仅包括查询最大的 N 个值、也包括了查询最小的 N 个值的场景。每次聚合的结果不是一行，而是 N 行
+
+这种函数相当于把一个表聚合成了另一个表，所以叫作“表聚合函数”（Table Aggregate Function）。
+
+表聚合函数的抽象比较困难，目前只有窗口 TVF 有能力提供直接的 Top N 聚合，不过也尚未实现。
+
+目前在 Flink SQL 中没有能够直接调用的 Top N 函数，而是提供了稍微复杂些的变通实现方法。
+
+#### 11.5.4.1 普通 Top N
+
+通过 OVER 聚合和一个条件筛选来实现 Top N 的。具体来说，是通过将一个特殊的聚合函数ROW_NUMBER()应用到OVER窗口上，统计出每一行排序后的行号，作为一个字段提取出来；然后再用 WHERE 子句筛选行号小于等于 N 的那些行返回。
+
+```sql
+SELECT ...
+FROM (
+ SELECT ...,
+ ROW_NUMBER() OVER (
+[PARTITION BY <字段 1>[, <字段 1>...]]
+ ORDER BY <排序字段 1> [asc|desc][, <排序字段 2> [asc|desc]...]
+) AS row_num
+ FROM ...)
+WHERE row_num <= N [AND <其它条件>]
+```
+
+这里的 OVER 窗口定义与之前的介绍基本一致，目的就是利用 ROW_NUMBER()函数为每一行数据聚合得到一个排序之后的行号。行号重命名为 row_num，并在外层的查询中以row_num <= N 作为条件进行筛选，就可以得到根据排序字段统计的 Top N 结果了。
+
+需要对关键字额外做一些说明：
+
+* WHERE
+
+用来指定 Top N 选取的条件，这里必须通过 row_num <= N 或者 row_num < N + 1 指定一个“排名结束点”（rank end），以保证结果有界。
+
+* PARTITION BY
+
+是可选的，用来指定分区的字段，这样我们就可以针对不同的分组分别统计 Top N 了。
+
+* ORDER BY
+
+指定了排序的字段，因为只有排序之后，才能进行前 N 个最大/最小的选取。每个排序字段后可以用 asc 或者 desc 来指定排序规则：asc 为升序排列，取出的就是最小的 N 个值；desc为降序排序，对应的就是最大的 N 个值。默认情况下为升序，asc 可以省略。
+
+因为 OVER 窗口目前并不完善，不过针对 Top N 这样一个经典应用场景，Flink SQL专门用 OVER 聚合做了优化实现。所以==只有在 Top N 的应用场景中，OVER 窗口 ORDER BY后才可以指定其它排序字段==；而要想实现 Top N，就==必须按照上面的格式进行定义，否则 Flink SQL 的优化器将无法正常解析==。而且，目前 Table API 中并不支持 ROW_NUMBER()函数，所以也只有 SQL 中这一种通用的 Top N 实现方式。
+
+Top N 的实现必须写成上面的嵌套查询形式。这是因为行号 row_num 是内部子查询聚合的结果，不可能在内部作为筛选条件，只能放在外层的 WHERE 子句中。
+
+统计每个用户的访问事件中，按照字符长度排序的前两个url：
+
+```sql
+SELECT user, url, ts, row_num
+FROM (
+ SELECT *,
+ ROW_NUMBER() OVER (
+PARTITION BY user
+ ORDER BY CHAR_LENGTH(url) desc 
+) AS row_num
+ FROM EventTable)
+WHERE row_num <= 2
+```
+
+这里以用户来分组，以访问 url 的字符长度作为排序的字段，降序排列后用聚合统计出每一行的行号，相当于在 EventTable 基础上扩展出了一列 row_num。而后筛选出行号小于等于 2 的所有数据，就得到了每个用户访问的长度最长的两个 url。
+
+这里的 Top N 聚合是一个更新查询。新数据到来后，可能会改变之前数据的排名，所以会有更新（UPDATE）操作。这是 ROW_NUMBER()聚合函数的特性决定的。因此，如果执行上面的 SQL 得到结果表，需要调用 toChangelogStream()才能转换成流打印输出。
+
+#### 11.5.4.2 窗口 Top N
+
+电商行业，实际应用中往往有这样的需求：统计一段时间内的热门商品。这就需要先开窗口，在窗口中统计每个商品的点击量；然后将统计数据收集起来，按窗口进行分组，并按点击量大小降序排序，选取前 N 个作为结果返回。
+
+先做一个窗口聚合，将窗口信息 window_start、window_end 连同每个商品的点击量一并返回，这样就得到了聚合的结果表，包含了窗口信息、商品和统计的点击量。
+
+接下来就可以像一般的 Top N 那样定义 OVER 窗口了，按窗口分组，按点击量排序，用ROW_NUMBER()统计行号并筛选前 N 行就可以得到结果。所以窗口 Top N 的实现就是窗口聚合与 OVER 聚合的结合使用。
+
+统计每小时内有最多访问行为的用户，取前两名，相当于是一个每小时活跃用户的查询。
+
+```java
+package org.neptune.TableAPIAndSQL;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.neptune.pojo.Event;
+
+import static org.apache.flink.table.api.Expressions.$;
+
+public class WindowTopNExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        // 读取数据源，并分配时间戳、生成水位线
+        SingleOutputStreamOperator<Event> eventStream = env.fromElements(new Event("Alice", "./home", 1000L),
+                        new Event("Bob", "./cart", 1000L),
+                        new Event("Alice", "./prod?id=1", 25 * 60 * 1000L),
+                        new Event("Alice", "./prod?id=4", 55 * 60 * 1000L),
+                        new Event("Bob", "./prod?id=5", 3600 * 1000L + 60 * 1000L),
+                        new Event("Cary", "./home", 3600 * 1000L + 30 * 60 * 1000L),
+                        new Event("Cary", "./prod?id=7", 3600 * 1000L + 59 * 60 * 1000L))
+                .assignTimestampsAndWatermarks(WatermarkStrategy.<Event>forMonotonousTimestamps()
+                        .withTimestampAssigner(new SerializableTimestampAssigner<Event>() {
+                            @Override
+                            public long extractTimestamp(Event element, long recordTimestamp) {
+                                return element.timestamp;
+                            }
+                        }));
+
+        // 创建表环境
+        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+
+        // 将数据流转换成表，并指定时间属性
+        Table eventTable = tableEnv.fromDataStream(eventStream,
+                $("user"),
+                $("url"),
+                $("timestamp").rowtime().as("ts"));// 将 timestamp 指定为事件时间，并命名为 ts
+
+        // 为方便在 SQL 中引用，在环境中注册表 EventTable
+        tableEnv.createTemporaryView("EventTable", eventTable);
+
+        // 定义子查询，进行窗口聚合，得到包含窗口信息、用户以及访问次数的结果表
+        String subQuery =
+                "SELECT window_start,window_end,user,COUNT(url) AS cnt " +
+                        "FROM TABLE ( " +
+                        "TUMBLE(TABLE EventTable, DESCRIPTOR(ts), INTERVAL '1' HOUR))" +
+                        "GROUP BY window_start,window_end,user ";
+        // 定义 Top N 的外层查询
+        String topNQuery =
+                "SELECT * " +
+                        "FROM (" +
+                        "SELECT *, " +
+                        "ROW_NUMBER() OVER ( " +
+                        "PARTITION BY window_start, window_end " +
+                        "ORDER BY cnt desc " +
+                        ") AS row_num " +
+                        "FROM (" + subQuery + ")) " +
+                        "WHERE row_num <= 2";
+        // 执行 SQL 得到结果表
+        Table result = tableEnv.sqlQuery(topNQuery);
+        tableEnv.toDataStream(result).print();
+        env.execute();
+    }
+}
+
+
+```
+
+1. 首先基于 ts 时间字段定义 1 小时滚动窗口，统计 EventTable 中每个用户的访问次数，重命名为 cnt；为了方便后面做排序，我们将窗口信息 window_start 和 window_end 也提取出来，与 user 和 cnt 一起作为聚合结果表中的字段。
+
+2. 然后套用 Top N 模板，对窗口聚合的结果表中每一行数据进行 OVER 聚合统计行号。这里以窗口信息进行分组，按访问次数 cnt 进行排序，并筛选行号小于等于 2 的数据，就可以得到每个窗口内访问次数最多的前两个用户了。
+
+```powershell
++I[1970-01-01T00:00, 1970-01-01T01:00, Alice, 3, 1]
++I[1970-01-01T00:00, 1970-01-01T01:00, Bob, 1, 2]
++I[1970-01-01T01:00, 1970-01-01T02:00, Cary, 2, 1]
++I[1970-01-01T01:00, 1970-01-01T02:00, Bob, 1, 2]
+```
+
+第一个 1 小时窗口中，Alice 有 3 次访问排名第一，Bob 有 1 次访问排名第二；而第二小时内，Cary 以 2 次访问占据活跃榜首，Bob 仍以 1 次访问排名第二。由于窗口的统计结果只会最终输出一次，所以排名也是确定的，这里结果表中只有插入（INSERT）操作。
+
+也就是说，窗口 Top N 是追加查询，可以直接用 toDataStream()将结果表转换成流打印输出。
+
+## 11.6 联结（Join）查询
+
+在标准 SQL 中，可以将多个表连接合并起来，从中查询出想要的信息；这种操作就是表的联结（Join）。在 Flink SQL 中，同样支持各种灵活的联结（Join）查询，操作的对象是动态表。
+
+在流处理中，动态表的 Join 对应着两条数据流的 Join 操作。与上一节的聚合查询类似，Flink SQL 中的联结查询大体上也可以分为两类：SQL 原生的联结查询方式，和流处理中特有的联结查询。
+
+### 11.6.1 常规联结查询
+
+Flink SQL 的常规联结也可以分为内联结（INNER JOIN）和外联结（OUTER JOIN），区别在于结果中是否包含不符合联结条件的行。==目前仅支持“等值条件”作为联结条件==，也就是关键字 ON 后面必须是判断两表中字段相等的逻辑表达式。**同常规SQL**
+
+#### 11.6.1.1 等值内联结（INNER Equi-JOIN）
+
+内联结用 INNER JOIN 来定义，会返回两表中符合联接条件的所有行的组合，也就是所谓的笛卡尔积（Cartesian product）。目前仅支持等值联结条件
+
+```sql
+SELECT *
+FROM Order
+INNER JOIN Product
+ON Order.product_id = Product.id
+```
+
+#### 11.6.1.2 等值外联结（OUTER Equi-JOIN）
+
+与内联结类似，外联结也会返回符合联结条件的所有行的笛卡尔积；另外，还可以将某一侧表中找不到任何匹配的行也单独返回。Flink SQL 支持左外（LEFT JOIN）、右外（RIGHT JOIN）和全外（FULL OUTER JOIN），分别表示会将左侧表、右侧表以及双侧表中没有任何匹配的行返回。
+
+例如，订单表中未必包含了商品表中的所有 ID，为了将哪些没有任何订单的商品信息也查询出来，就可以使用右外联结（RIGHT JOIN）。当然，外联结查询目前也仅支持等值联结条件。具体用法如下：
+
+```sql
+SELECT *
+FROM Order
+LEFT JOIN Product
+ON Order.product_id = Product.id
+SELECT *
+FROM Order
+RIGHT JOIN Product
+ON Order.product_id = Product.id
+SELECT *
+FROM Order
+FULL OUTER JOIN Product
+ON Order.product_id = Product.id
+```
+
+### 11.6.2 间隔联结查询
+
+目前 Flink SQL 还不支持窗口联结，而间隔联结则已经实现。
+
+间隔联结（Interval Join）返回的，同样是符合约束条件的两条中数据的笛卡尔积。只不过这里的“约束条件”除了常规的联结条件外，还多了一个时间间隔的限制。具体语法有以下要点：
+
+* 两表的联结
+
+间隔联结不需要用 JOIN 关键字，直接在 FROM 后将要联结的两表列出来就可以，用逗号分隔。这与标准 SQL 中的语法一致，表示一个“交叉联结”（Cross Join），会返回两表中所有行的笛卡尔积。
+
+* 联结条件
+
+联结条件用 WHERE 子句来定义，用一个等值表达式描述。交叉联结之后再用 WHERE进行条件筛选，效果跟内联结 INNER JOIN ... ON ...非常类似。
+
+* 时间间隔限制
+
+在 WHERE 子句中，联结条件后用 AND 追加一个时间间隔的限制条件；做法是提取左右两侧表中的时间字段，然后用一个表达式来指明两者需要满足的间隔限制。具体定义方式有下面三种，这里分别用 ltime 和 rtime 表示左右表中的时间字段：
+
+1. `ltime = rtime`
+
+2. `ltime >= rtime AND ltime < rtime + INTERVAL '10' MINUTE`
+
+3. `ltime BETWEEN rtime - INTERVAL '10' SECOND AND rtime + INTERVAL '5' SECOND`
+
+判断两者相等，这是最强的时间约束，要求两表中数据的时间必须完全一致才能匹配；一般情况下，我们还是会放宽一些，给出一个间隔。间隔的定义可以用<，<=，>=，>这一类的关系不等式，也可以用 BETWEEN ... AND ...这样的表达式。
+
+例如，现在除了订单表 Order 外，还有一个“发货表”Shipment，要求在收到订单后四个小时内发货。那么就可以用一个间隔联结查询，把所有订单与它对应的发货信息连接合并在一起返回。
+
+```sql
+SELECT *
+FROM Order o, Shipment s
+WHERE o.id = s.order_id
+AND o.order_time BETWEEN s.ship_time - INTERVAL '4' HOUR AND s.ship_time
+```
+
+在流处理中，间隔联结查询只支持具有时间属性的“仅追加”（Append-only）表。
+
+那对于有更新操作的表，又怎么办呢？除了间隔联结之外，Flink SQL 还支持时间联结（Temporal Join），这主要是针对“版本表”（versioned table）而言的。所谓版本表，就是记录了数据随着时间推移版本变化的表，可以理解成一个“更新日志”（change log），它就是具有时间属性、还会进行更新操作的表。当我们联结某个版本表时，并不是把当前的数据连接合并起来就行了，而是希望能够根据数据发生的时间，找到当时的“版本”；这种根据更新时间提取当时的值进行联结的操作，就叫作“时间联结”（Temporal Join）。这部分内容由于涉及版本表的定义，此处不详细展开了，可以查阅官网资料。
+
+## 11.7 函数
+
+Flink SQL 中的函数可以分为两类：一类是 SQL 中内置的系统函数，直接通过函数名调用就可以，能够实现一些常用的转换操作，比如 COUNT()、CHAR_LENGTH()、UPPER()等等；而另一类函数则是用户自定义的函数（UDF），需要在表环境中注册才能使用。
+
+### 11.7.1 系统函数
+
+系统函数（System Functions）也叫内置函数（Built-in Functions），是在系统中预先实现好的功能模块。可以通过固定的函数名直接调用，实现想要的转换操作。
+
+Flink SQL 中的系统函数又主要可以分为两大类：标量函数（Scalar Functions）和聚合函数（Aggregate Functions）。
+
+#### 11.7.1.1  标量函数（Scalar Functions）
+
+“标量”是指只有数值大小、没有方向的量；所以标量函数指的就是**只对输入数据做转换操作、返回一个值的函数**。这里的输入数据指表中一行数据中 1 个或多个字段，因此这种操作有点像流处理转换算子中的 map。另外，对于一些没有输入参数、直接可以得到唯一结果的函数，也属于标量函数。
+
+常用函数列表：
+
+- 比较函数（Comparison Functions）
+
+  比较函数是一个比较表达式，用来判断两个值之间的关系，返回一个布尔类型的值。这个比较表达式可以是用 <、>、= 等符号连接两个值，也可以是用关键字定义的某种判断。
+  - value1 = value2 判断两个值相等
+  - value1 <> value2 判断两个值不相等
+  - value IS NOT NULL 判断 value 不为空
+
+- 逻辑函数（Logical Functions）
+
+  逻辑函数是一个逻辑表达式，也就是用与（AND）、或（OR）、非（NOT）将布尔类型的值连接起来，也可以用判断语句（IS、IS NOT）进行真值判断；返回的还是一个布尔类型的值。例如：
+
+  * boolean1 OR boolean2 布尔值 boolean1 与布尔值 boolean2 取逻辑或
+  * boolean IS FALSE 判断布尔值 boolean 是否为 false
+  * NOT boolean 布尔值 boolean 取逻辑非
+
+- 算术函数（Arithmetic Functions）
+
+  进行算术计算的函数，包括用算术符号连接的运算，和复杂的数学运算。例如：
+
+  * numeric1 + numeric2 两数相加
+  * POWER(numeric1, numeric2) 幂运算，取数 numeric1 的 numeric2 次方
+  * RAND() 返回（0.0, 1.0）区间内的一个 double 类型的伪随机数
+
+- 字符串函数（String Functions）
+
+  进行字符串处理的函数。例如：
+
+  * string1 || string2 两个字符串的连接
+  * UPPER(string) 将字符串 string 转为全部大写
+  * CHAR_LENGTH(string) 计算字符串 string 的长度
+
+- 时间函数（Temporal Functions）
+
+  进行与时间相关操作的函数。例如：
+
+  * DATE string 按格式"yyyy-MM-dd"解析字符串 string，返回类型为 SQL Date
+  * TIMESTAMP string 按格式"yyyy-MM-dd HH:mm:ss[.SSS]"解析，返回类型为 SQL timestamp
+  * CURRENT_TIME 返回本地时区的当前时间，类型为 SQL time（与 LOCALTIME等价）
+  * INTERVAL string range 返回一个时间间隔。string 表示数值；range 可以是 DAY，MINUTE，DAT TO HOUR 等单位，也可以是 YEAR TO MONTH 这样的复合单位。如“2 年10 个月”可以写成：INTERVAL '2-10' YEAR TO MONTH
+
+#### 11.7.1.2 聚合函数（Aggregate Functions）
+
+聚合函数是以表中多个行作为输入，提取字段进行聚合操作的函数，会将唯一的聚合值作为结果返回。
+
+* COUNT(*) 返回所有行的数量，统计个数
+
+* SUM([ ALL | DISTINCT ] expression) 对某个字段进行求和操作。默认情况下省略了关键字 ALL，表示对所有行求和；如果指定 DISTINCT，则会对数据进行去重，每个值只叠加一次。
+
+* RANK() 返回当前值在一组值中的排名
+
+* ROW_NUMBER() 对一组值排序后，返回当前值的行号。与 RANK()的功能相似
+
+**其中，RANK()和 ROW_NUMBER()一般用在 OVER 窗口中**
+
+### 11.7.2 自定义函数（UDF）
+
+Flink 的 Table API 和 SQL 提供了多种自定义函数的接口，以抽象类的形式定义。当前 UDF主要有以下几类：
+
+* 标量函数（Scalar Functions）：将输入的标量值转换成一个新的标量值；
+
+* 表函数（Table Functions）：将标量值转换成一个或多个新的行数据，也就是扩展成一个表；
+
+* 聚合函数（Aggregate Functions）：将多行数据里的标量值转换成一个新的标量值；
+
+* 表聚合函数（Table Aggregate Functions）：将多行数据里的标量值转换成一个或多个新的行数据。
+
+#### 11.7.2.1 整体调用流程
+
+* 注册函数
+
+  注册函数时需要调用表环境的 createTemporarySystemFunction()方法，传入注册的函数名以及 UDF 类的 Class 对象：
+
+  ```java
+  // 注册函数
+  tableEnv.createTemporarySystemFunction("MyFunction", MyFunction.class);
+  ```
+
+  自定义的 UDF 类叫作 MyFunction，它应该是上面四种 UDF 抽象类中某一个的具体实现；在环境中将它注册为名叫 MyFunction 的函数。
+
+  * createTemporarySystemFunction()：创建一个“临时系统函数”，是全局的 ， 可以当作系统函数来使用；
+  * createTemporaryFunction()：创建一个“目录函数”（catalog function），注册的函数依赖于当前的数据库（database）和目录（catalog），它的完整名称应该包括所属的 database 和 catalog。
+
+  **一般情况下，直接用 createTemporarySystemFunction()方法将 UDF 注册为系统函数**
+
+* 使用 Table API 调用函数
+
+  在 Table API 中，使用 call()方法来调用自定义函数：
+
+  ```java
+  tableEnv.from("MyTable").select(call("MyFunction", $("myField")));
+  ```
+
+  这里 call()方法有两个参数，一个是注册好的函数名 MyFunction，另一个则是函数调用时本身的参数。
+
+  这里定义 MyFunction 在调用时，需要传入的参数是 myField 字段。
+
+  此外，在 Table API 中也可以不注册函数，直接用“内联”（inline）的方式调用 UDF：
+
+  ```java
+  tableEnv.from("MyTable").select(call(SubstringFunction.class, $("myField")));
+  ```
+
+  区别只是在于 call()方法第一个参数不再是注册好的函数名，而直接就是函数类的 Class对象了。
+
+* **在 SQL 中调用函数**
+
+  将函数注册为系统函数之后，在 SQL 中的调用就与内置系统函数完全一样了：
+
+  ```sql
+  tableEnv.sqlQuery("SELECT MyFunction(myField) FROM MyTable");
+  ```
+
+#### 11.7.2.2 标量函数（Scalar Functions）
+
+想要实现自定义的标量函数，我们需要自定义一个类来继承抽象类 ScalarFunction，并实现叫作 eval() 的求值方法。标量函数的行为就取决于求值方法的定义，它必须是公有的（public），而且名字必须是 eval。求值方法 eval 可以重载多次，任何数据类型都可作为求值方法的参数和返回值类型。
+
+ScalarFunction 抽象类中并没有定义 eval()方法，所以我们不能直接在代码中重写（override）；但 Table API 的框架底层又要求了求值方法必须名字为 eval()。这是 Table API 和 SQL 目前还显得不够完善的地方，未来的版本应该会有所改进。
+
+ScalarFunction 以及其它所有的 UDF 接口，都在 org.apache.flink.table.functions 中。
+
+实现一个自定义的哈希（hash）函数 HashFunction，用来求传入对象的哈希值。
+
+```java
+public static class HashFunction extends ScalarFunction {
+ 	// 接受任意类型输入，返回 INT 型输出
+ 	public int eval(@DataTypeHint(inputGroup = InputGroup.ANY) Object o) {
+ 	return o.hashCode();
+ 	}
+}
+	// 注册函数
+	tableEnv.createTemporarySystemFunction("HashFunction", HashFunction.class);
+	// 在 SQL 里调用注册好的函数
+	tableEnv.sqlQuery("SELECT HashFunction(myField) FROM MyTable");
+```
+
+这里自定义了一个 ScalarFunction，实现了 eval()求值方法，将任意类型的对象传入，得到一个 Int 类型的哈希值返回。当然，具体的求哈希操作就省略了，直接调用对象的 hashCode()方法即可。
+
+另外注意，由于 Table API 在对函数进行解析时需要提取求值方法参数的类型引用，所以用 DataTypeHint(inputGroup = InputGroup.ANY)对输入参数的类型做了标注，表示 eval 的参数可以是任意类型。
+
+#### 11.7.2.3 表函数（Table Functions）
+
+要实现自定义的表函数，需要自定义类来继承抽象类 TableFunction，内部必须要实现的也是一个名为 eval 的求值方法。与标量函数不同的是，TableFunction 类本身是有一个泛型参数T 的，这就是表函数返回数据的类型；而 eval()方法没有返回类型，内部也没有 return语句，是通过调用 collect()方法来发送想要输出的行数据的。
+
+DataStream API 中的 FlatMapFunction 和 ProcessFunction的 flatMap 和 processElement 方法也没有返回值，也是通过 out.collect()来向下游发送数据的。
+
+使用表函数，可以对一行数据得到一个表，让输入表中的每一行，与它转换得到的表进行联结（join），然后再拼成一个完整的大表，这就相当于对原来的表进行了扩展。在 Hive 的 SQL 语法中，提供了“侧向视图”（lateral view，也叫横向视图）的功能，可以将表中的一行数据拆分成多行；Flink SQL 也有类似的功能，是用 LATERAL TABLE 语法来实现的。
+
+在 SQL 中调用表函数，需要使用 LATERAL TABLE(<TableFunction>)来生成扩展的“侧向表”，然后与原始表进行联结（Join）。这里的 Join 操作可以是直接做交叉联结（cross join），在 FROM 后用逗号分隔两个表就可以；也可以是以 ON TRUE 为条件的左联结（LEFT JOIN）。
+
+下面是表函数的一个具体示例。实现了一个分隔字符串的函数 SplitFunction，可以将一个字符串转换成（字符串，长度）的二元组。
+
+```java
+        // 注意这里的类型标注，输出是 Row 类型，Row 中包含两个字段：word 和 length。
+        @FunctionHint(output = @DataTypeHint("ROW<word STRING, length INT>"))
+        public static class SplitFunction extends TableFunction<Row> {
+            public void eval(String str) {
+                for (String s : str.split(" ")) {
+                    // 使用 collect()方法发送一行数据
+                    collect(Row.of(s, s.length()));
+                }
+            }
+        }
+        // 注册函数
+        tableEnv.createTemporarySystemFunction("SplitFunction", SplitFunction.class);
+        // 在 SQL 里调用注册好的函数
+        // 1. 交叉联结
+        tableEnv.sqlQuery(
+                "SELECT myField, word, length " +
+                        "FROM MyTable, LATERAL TABLE(SplitFunction(myField))");
+        // 2. 带 ON TRUE 条件的左联结
+        tableEnv.sqlQuery(
+                "SELECT myField, word, length " +
+                        "FROM MyTable " +
+                        "LEFT JOIN LATERAL TABLE(SplitFunction(myField)) ON TRUE");
+        // 重命名侧向表中的字段
+        tableEnv.sqlQuery(
+                "SELECT myField, newWord, newLength " +
+                        "FROM MyTable " +
+                        "LEFT JOIN LATERAL TABLE(SplitFunction(myField)) AS T(newWord, newLength) ON TRUE");
+```
+
+这里直接将表函数的输出类型定义成了 ROW，这就是得到的侧向表中的数据类型；每行数据转换后也只有一行。分别用交叉联结和左联结两种方式在 SQL 中进行了调用，还可以对侧向表的中字段进行重命名。
+
+#### 11.7.2.4 聚合函数（Aggregate Functions）
+
+自定义聚合函数需要继承抽象类 AggregateFunction。AggregateFunction 有两个泛型参数<T, ACC>，T 表示聚合输出的结果类型，ACC 则表示聚合的中间状态类型。
+
+Flink SQL 中的聚合函数的工作原理如下：
+
+1. 首先，需要创建一个累加器（accumulator），用来存储聚合的中间结果。这与DataStream API 中的 AggregateFunction 非常类似，累加器就可以看作是一个聚合状态。调用createAccumulator()方法可以创建一个空的累加器。
+
+2. 对于输入的每一行数据，都会调用 accumulate()方法来更新累加器，这是聚合的核心过程。
+
+3. 当所有的数据都处理完之后，通过调用 getValue()方法来计算并返回最终的结果。
+
+   每个 AggregateFunction 都必须实现以下几个方法：
+
+   * createAccumulator()：创建累加器的方法。没有输入参数，返回类型为累加器类型 ACC。
+
+   * accumulate()：进行聚合计算的核心方法，每来一行数据都会调用，第一个参数是当前的累加器，类型为 ACC，表示当前聚合的中间状态；后面的参数则是聚合函数调用时传入的参数，可以有多个，类型也可以不同。这个方法主要是更新聚合状态，所以没有返回类型。
+
+     需要注意的是，accumulate()与之前的求值方法 eval()类似，也是底层架构要求的，必须为 public，方法名必须为 accumulate，且无法直接 override、只能手动实现。
+
+   * getValue()：得到最终返回结果的方法。输入参数是 ACC 类型的累加器，输出类型为 T。
+
+   在遇到复杂类型时，Flink 的类型推导可能会无法得到正确的结果。所以AggregateFunction也可以专门对累加器和返回结果的类型进行声明，这是通过 getAccumulatorType()和getResultType()两个方法来指定的。
+
+还有一些可选方法：
+
+* 如果是对会话窗口进行聚合，merge()方法就是必须要实现的，它会定义累加器的合并操作，而且这个方法对一些场景的优化也很有用；
+* 如果聚合函数用在 OVER 窗口聚合中，就必须实现 retract()方法，保证数据可以进行撤回操作；
+* resetAccumulator()方法则是重置累加器，这在一些批处理场景中会比较有用。
+
+AggregateFunction 的所有方法都必须是 公有的（public），不能是静态的（static）。
+
+从学生的分数表 ScoreTable 中计算每个学生的加权平均分。
+
+从输入的每行数据中提取两个值作为参数：要计算的分数值 score，以及它的权重weight。而在聚合过程中，累加器（accumulator）需要存储当前的加权总和 sum，以及目前数据的个数 count。这可以用一个二元组来表示，也可以单独定义一个类 WeightedAvgAccum，里面包含 sum 和 count 两个属性，用它的对象实例来作为聚合的累加器。
+
+```java
+        // 累加器类型定义
+        public static class WeightedAvgAccumulator {
+            public long sum = 0; // 加权和
+            public int count = 0; // 数据个数
+        }
+        // 自定义聚合函数，输出为长整型的平均值，累加器类型为 WeightedAvgAccumulator
+        public static class WeightedAvg extends AggregateFunction<Long,
+                WeightedAvgAccumulator> {
+
+            @Override
+            public WeightedAvgAccumulator createAccumulator() {
+                return new WeightedAvgAccumulator(); // 创建累加器
+            }
+
+            @Override
+            public Long getValue(WeightedAvgAccumulator acc) {
+                if (acc.count == 0) {
+                    return null; // 防止除数为 0
+                } else {
+                    return acc.sum / acc.count; // 计算平均值并返回
+                }
+            }
+
+            // 累加计算方法，每来一行数据都会调用
+            public void accumulate(WeightedAvgAccumulator acc, Long iValue, Integer iWeight) {
+                acc.sum += iValue * iWeight;
+                acc.count += iWeight;
+            }
+        }
+        // 注册自定义聚合函数
+        tableEnv.createTemporarySystemFunction("WeightedAvg", WeightedAvg.class);
+        // 调用函数计算加权平均值
+        Table result = tableEnv.sqlQuery(
+                "SELECT student, WeightedAvg(score, weight) FROM ScoreTable GROUP BY student"
+        );
+```
+
+聚合函数的 accumulate()方法有三个输入参数。第一个是 WeightedAvgAccum 类型的累加器；另外两个则是函数调用时输入的字段：要计算的值 ivalue 和 对应的权重 iweight。
+
+#### 11.7.2.5 表聚合函数（Table Aggregate Functions）
+
+自定义表聚合函数需要继承抽象类 TableAggregateFunction。TableAggregateFunction 的结构和原理与 AggregateFunction 非常类似，同样有两个泛型参数<T, ACC>，用一个 ACC 类型的累加器（accumulator）来存储聚合的中间结果。聚合函数中必须实现的三个方法，在TableAggregateFunction 中也必须对应实现：
+
+* createAccumulator()：创建累加器的方法，与 AggregateFunction 中用法相同。
+* accumulate()：聚合计算的核心方法，与 AggregateFunction 中用法相同。
+* emitValue()：所有输入行处理完成后，输出最终计算结果的方法。这个方法对应着 AggregateFunction中的 getValue()方法；区别在于 emitValue 没有输出类型，而输入参数有两个：第一个是 ACC类型的累加器，第二个则是用于输出数据的“收集器”out，它的类型为 Collect<T>。表聚合函数输出数据不是直接 return，而是调用 out.collect()方法，调用多次就可以输出多行数据了；这一点与表函数非常相似。另外，emitValue()在抽象类中也没有定义，无法 override，必须手动实现。
+
+TableAggregateFunction 提供了一个 emitUpdateWithRetract()方法，它可以在结果表发生变化时，以“撤回”（retract）老数据、发送新数据的方式增量地进行更新。如果同时定义了 emitValue()和emitUpdateWithRetract()两个方法，在进行更新操作时会优先调用 emitUpdateWithRetract()。
+
+ Top N 查询 
+
+自定义一个表聚合函数来实现TOP-2。在累加器中应该能够保存当前最大的两个值，每当来一条新数据就在 accumulate()方法中进行比较更新，最终在 emitValue()中调用两次out.collect()将前两名数据输出。
+
+```java
+        // 聚合累加器的类型定义，包含最大的第一和第二两个数据
+        public static class Top2Accumulator {
+            public Integer first;
+            public Integer second;
+        }
+        // 自定义表聚合函数，查询一组数中最大的两个，返回值为(数值，排名)的二元组
+        public static class Top2 extends TableAggregateFunction<Tuple2<Integer, Integer>,Top2Accumulator> {
+            @Override
+            public Top2Accumulator createAccumulator() {
+                Top2Accumulator acc = new Top2Accumulator();
+                acc.first = Integer.MIN_VALUE; // 为方便比较，初始值给最小值
+                acc.second = Integer.MIN_VALUE;
+                return acc;
+            }
+
+            // 每来一个数据调用一次，判断是否更新累加器
+            public void accumulate(Top2Accumulator acc, Integer value) {
+                if (value > acc.first) {
+                    acc.second = acc.first;
+                    acc.first = value;
+                } else if (value > acc.second) {
+                    acc.second = value;
+                }
+            }
+
+            // 输出(数值，排名)的二元组，输出两行数据
+            public void emitValue(Top2Accumulator acc, Collector<Tuple2<Integer, Integer>> out) {
+                if (acc.first != Integer.MIN_VALUE) {
+                    out.collect(Tuple2.of(acc.first, 1));
+                }
+                if (acc.second != Integer.MIN_VALUE) {
+                    out.collect(Tuple2.of(acc.second, 2));
+                }
+            }
+        }
+```
+
+目前 SQL 中没有直接使用表聚合函数的方式，所以需要使用 Table API 的方式来调用：
+
+```java
+	// 注册表聚合函数函数
+	tableEnv.createTemporarySystemFunction("Top2", Top2.class);
+	// 在 Table API 中调用函数
+	tableEnv.from("MyTable")
+ 		.groupBy($("myField"))
+ 		.flatAggregate(call("Top2", $("value")).as("value", "rank"))
+ 		.select($("myField"), $("value"), $("rank"));
+```
+
+这里使用了 flatAggregate()方法，它就是专门用来调用表聚合函数的接口。对 MyTable 中数据按 myField 字段进行分组聚合，统计 value 值最大的两个；并将聚合结果的两个字段重命名为 value 和 rank，之后就可以使用 select()将它们提取出来了。
+
+## 11.8 SQL 客户端
+
+Flink 为我们提供了一个工具来进行 Flink 程序的编写、测试和提交，这工具叫作“SQL 客户端”。
+
+SQL 客户端提供了一个命令行交互界面（CLI），可以在里面非常容易地编写 SQL 进行查询，就像使用 MySQL 一样；整个 Flink 应用编写、提交的过程全变成了写 SQL，不需要写一行 Java/Scala 代码。
+
+具体使用流程如下：
+
+### 11.8.1 启动本地集群
+
+```perl
+./bin/start-cluster.sh
+```
+
+### 11.8.2 启动 Flink SQL 客户端
+
+```perl
+./bin/sql-client.sh
+```
+
+默认的启动模式是 embedded，也就是说客户端是一个嵌入在本地的进程，这是目前唯一支持的模式。未来会支持连接到远程 SQL客户端的模式。
+
+### 11.8.3 设置运行模式
+
+表环境的运行时模式，有流处理和批处理两个选项。默认为流处理：
+
+```sql
+Flink SQL> SET 'execution.runtime-mode' = 'streaming';
+```
+
+SQL 客户端的“执行结果模式”，主要有 table、changelog、tableau 三种，默认为table 模式：
+
+```sql
+Flink SQL> SET 'sql-client.execution.result-mode' = 'table';
+```
+
+* table 模式就是最普通的表处理模式，结果会以逗号分隔每个字段；
+* changelog 则是更新日志模式，会在数据前加上“+”（表示插入）或“-”（表示撤回）的前缀；
+* tableau 则是经典的可视化表模式，结果会是一个虚线框的表格。
+
+还可以做一些其它可选的设置，如空闲状态生存时间（TTL）：
+
+```sql
+Flink SQL> SET 'table.exec.state.ttl' = '1000';
+```
+
+除了在命令行进行设置，也可以直接在 SQL 客户端的配置文件 sql-cli-defaults.yaml中进行各种配置，甚至还可以在这个 yaml 文件里预定义表、函数和 catalog。关于配置文件的更多用法，可以查阅官网的详细说明。
+
+### 11.8.4 执行 SQL 查询（同关系型数据库MySQL）
+
+```sql
+Flink SQL> CREATE TABLE EventTable(
+> user STRING,
+> url STRING,
+> `timestamp` BIGINT
+> ) WITH (
+> 'connector' = 'filesystem',
+> 'path' = 'events.csv',
+> 'format' = 'csv'
+> );
+Flink SQL> CREATE TABLE ResultTable (
+> user STRING,
+> cnt BIGINT
+> ) WITH (
+> 'connector' = 'print'
+> );
+Flink SQL> INSERT INTO ResultTable SELECT user, COUNT(url) as cnt FROM EventTable
+GROUP BY user;
+```
+
+这里直接用 DDL 创建两张表，注意需要有 WITH 定义的外部连接。
+
+一张表叫作EventTable，是从外部文件 events.csv 中读取数据的，这是输入数据表；
+
+另一张叫作 ResultTable，连接器为“print”，其实就是标准控制台打印，当然就是输出表了。
+
+接下来直接执行 SQL 查询，并将查询结果 INSERT 写入结果表中了。
+
+在 SQL 客户端中，每定义一个 SQL 查询，就会把它作为一个 Flink 作业提交到集群上执行。所以通过这种方式，我们可以快速地对流处理程序进行开发测试。
+
+## 11.9 连接到外部系统
+
+在 Table API 和 SQL 编写的 Flink 程序中，可以在创建表的时候用 WITH 子句指定连接器（connector），这样就可以连接到外部系统进行数据交互了。
+
