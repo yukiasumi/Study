@@ -9857,3 +9857,933 @@ GROUP BY user;
 
 在 Table API 和 SQL 编写的 Flink 程序中，可以在创建表的时候用 WITH 子句指定连接器（connector），这样就可以连接到外部系统进行数据交互了。
 
+在 Flink 1.13 的 API 调用中，已经不区分 TableSource 和 TableSink了，只要建立到外部系统的连接并创建表就可以，Flink 自动会从程序的处理逻辑中解析出它们的用途。
+
+Flink 的 Table API 和 SQL 支持了各种不同的连接器。当然，最简单的就是连接到控制台打印输出：
+
+```sql
+CREATE TABLE ResultTable (
+user STRING,
+cnt BIGINT
+WITH (
+'connector' = 'print'
+);
+```
+
+只需要在 WITH 中定义 connector 为 print 就可以了
+
+### 11.9.1 Kafka
+
+Kafka 的 SQL 连接器可以从 Kafka 的主题（topic）读取数据转换成表，也可以将表数据写入 Kafka 的主题。
+
+创建表的时候指定连接器为 Kafka，则这个表既可以作为输入表，也可以作为输出表。
+
+#### 11.9.1.1 引入依赖
+
+```xml
+<dependency>
+ <groupId>org.apache.flink</groupId>
+ <artifactId>flink-connector-kafka_${scala.binary.version}</artifactId>
+ <version>${flink.version}</version>
+</dependency>
+```
+
+这里引入的 Flink-Kafka 连接器，与 DataStream API 中引入的连接器是一样的。
+
+如果想在 SQL 客户端里使用 Kafka 连接器，还需要下载对应的 jar 包放到 lib 目录下。
+
+Flink 为各种连接器提供了一系列的“表格式”（table formats），比如 CSV、JSON、Avro、Parquet 等等。这些表格式定义了底层存储的二进制数据和表的列之间的转换方式，相当于表的序列化工具。对于 Kafka 而言，CSV、JSON、Avro 等主要格式都是支持的，根据 Kafka 连接器中配置的格式，需要引入对应的依赖支持。
+
+以 CSV 为例：
+
+```xml
+<dependency>
+ <groupId>org.apache.flink</groupId>
+ <artifactId>flink-csv</artifactId>
+ <version>${flink.version}</version>
+</dependency>
+```
+
+由于 SQL 客户端中已经内置了 CSV、JSON 的支持，因此使用时无需专门引入；而对于没有内置支持的格式（比如 Avro），则仍然要下载相应的 jar 包。关于连接器的格式细节详见官网说明。
+
+#### 11.9.1.2 创建连接到 Kafka 的表
+
+创建一个连接到 Kafka 表，需要在 CREATE TABLE 的 DDL 中在 WITH 子句里指定连接器为 Kafka，并定义必要的配置参数。
+
+```sql
+CREATE TABLE KafkaTable (
+`user` STRING,
+ `url` STRING,
+ `ts` TIMESTAMP(3) METADATA FROM 'timestamp'
+) WITH (
+ 'connector' = 'kafka',
+ 'topic' = 'events',
+ 'properties.bootstrap.servers' = 'localhost:9092',
+ 'properties.group.id' = 'testGroup',
+ 'scan.startup.mode' = 'earliest-offset',
+ 'format' = 'csv'
+)
+```
+
+这里定义了 Kafka 连接器对应的主题（topic），Kafka 服务器，消费者组 ID，消费者起始模式以及表格式。
+
+在 KafkaTable 的字段中有一个 ts，它的声明中用到了METADATA FROM，这是表示一个“元数据列”（metadata column），它是由 Kafka 连接器的元数据“timestamp”生成的。这里的 timestamp 其实就是 Kafka 中数据自带的时间戳，直接作为元数据提取出来，转换成一个新的字段 ts。
+
+#### 11.9.1.3 Upsert Kafka
+
+由于Kafka无法更新数据，Flink提供了Upsert Kafka连接器。
+
+Upsert Kafka 连接器处理的是**更新日志（changlog）流**。
+
+作为 TableSource，连接器会将读取到的 topic中的数据（key, value），解释为对当前 key 的数据值的更新（UPDATE），查找动态表中 key 对应的一行数据，将 value 更新为最新的值；因为是 Upsert 操作，如果没有 key 对应的行，就执行插入（INSERT）操作。如果 value 为空（null），连接器就把这条数据理解为对相应 key 那一行的删除（DELETE）操作。
+
+作为 TableSink，连接器会将有更新操作的结果表，转换成更新日志（changelog）流。如果遇到插入（INSERT）或者更新后（UPDATE_AFTER）的数据，对应的是一个添加（add）消息，那么就直接正常写入 Kafka 主题；如果是删除（DELETE）或者更新前的数据，对应是一个撤回（retract）消息，那么就把 value 为空（null）的数据写入 Kafka。由于 Flink 是根据键（key）的值对数据进行分区的，这样就可以保证同一个 key 上的更新和删除消息都会落到同一个分区中。
+
+创建和使用 Upsert Kafka 表：
+
+```sql
+CREATE TABLE pageviews_per_region (
+ user_region STRING,
+ pv BIGINT,
+ uv BIGINT,
+ PRIMARY KEY (user_region) NOT ENFORCED
+) WITH (
+ 'connector' = 'upsert-kafka',
+ 'topic' = 'pageviews_per_region',
+ 'properties.bootstrap.servers' = '...',
+ 'key.format' = 'avro',
+ 'value.format' = 'avro'
+);
+CREATE TABLE pageviews (
+ user_id BIGINT,
+ page_id BIGINT,
+ viewtime TIMESTAMP,
+ user_region STRING,
+ WATERMARK FOR viewtime AS viewtime - INTERVAL '2' SECOND
+) WITH (
+ 'connector' = 'kafka',
+ 'topic' = 'pageviews',
+ 'properties.bootstrap.servers' = '...',
+ 'format' = 'json'
+);
+-- 计算 pv、uv 并插入到 upsert-kafka 表中
+INSERT INTO pageviews_per_region
+SELECT
+ user_region,
+ COUNT(*),
+ COUNT(DISTINCT user_id)
+FROM pageviews
+GROUP BY user_region;
+```
+
+这里从 Kafka 表 pageviews 中读取数据，统计每个区域的 PV（全部浏览量）和 UV（对用户去重），这是一个分组聚合的更新查询，得到的结果表会不停地更新数据。为了将结果表写入 Kafka 的 pageviews_per_region 主题，定义了一个 Upsert Kafka 表，它的字段中需要用PRIMARY KEY来指定主键，并且在WITH子句中分别指定key和value的序列化格式。
+
+### 11.9.2 文件系统
+
+从本地或者分布式的文件系统中读写数据。连接器是内置在 Flink 中的，不需要额外引入依赖
+
+```sql
+CREATE TABLE MyTable (
+ column_name1 INT,
+ column_name2 STRING,
+ ...
+ part_name1 INT,
+ part_name2 STRING
+) PARTITIONED BY (part_name1, part_name2) WITH (
+ 'connector' = 'filesystem', -- 连接器类型
+ 'path' = '...', -- 文件路径
+ 'format' = '...' -- 文件格式
+)
+```
+
+这里在 WITH 前使用 PARTITIONED BY 对数据进行分区操作。文件系统连接器支持对分区文件的访问。
+
+### 11.9.3 JDBC
+
+Flink 提供的 JDBC 连接器可以通过 JDBC 驱动程序（driver）向任意的关系型数据库读写数据，如 MySQL、PostgreSQL、Derby 等。
+
+作为 TableSink 向数据库写入数据时，运行的模式取决于创建表的 DDL 是否定义了主键（primary key）。如果有主键，那么 JDBC 连接器就将以更新插入（Upsert）模式运行，可以向外部数据库发送按照指定键（key）的更新（UPDATE）和删除（DELETE）操作；如果没有定义主键，那么就将在追加（Append）模式下运行，不支持更新和删除操作。
+
+#### 11.9.3.1 引入依赖
+
+```xml
+<dependency>
+ <groupId>org.apache.flink</groupId>
+ <artifactId>flink-connector-jdbc_${scala.binary.version}</artifactId>
+ <version>${flink.version}</version>
+</dependency>
+```
+
+为了连接到特定的数据库，还需要引入相关的驱动器依赖，比如 MySQL
+
+```xml
+<dependency>
+ <groupId>mysql</groupId>
+ <artifactId>mysql-connector-java</artifactId>
+ <version>5.1.37</version>
+</dependency>
+```
+
+#### 11.9.3.2 创建 JDBC 表
+
+```sql
+-- 创建一张连接到 MySQL 的 表
+CREATE TABLE MyTable (
+ id BIGINT,
+ name STRING,
+ age INT,
+ status BOOLEAN,
+ PRIMARY KEY (id) NOT ENFORCED
+) WITH (
+ 'connector' = 'jdbc',
+ 'url' = 'jdbc:mysql://localhost:3306/mydatabase',
+ 'table-name' = 'users'
+);
+-- 将另一张表 T 的数据写入到 MyTable 表中
+INSERT INTO MyTable
+SELECT id, name, age, status FROM T;
+```
+
+这里创建表的 DDL 中定义了主键，所以数据会以 Upsert 模式写入到 MySQL 表中；而到MySQL 的连接，是通过 WITH 子句中的 url 定义的。要注意写入 MySQL 中真正的表名称是users，而 MyTable 是注册在 Flink 表环境中的表。
+
+### 11.9.4 Elasticsearch
+
+Flink 提供的Elasticsearch的SQL连接器只能作为TableSink，可以将表数据写入Elasticsearch的索引（index）。Elasticsearch 连接器的使用与 JDBC 连接器非常相似，写入数据的模式同样是由创建表的 DDL中是否有主键定义决定的。
+
+#### 11.9.4.1 引入依赖
+
+对于 Elasticsearch 6.x 版本：
+
+```xml
+<dependency>
+ <groupId>org.apache.flink</groupId> 
+<artifactId>flink-connector-elasticsearch6_${scala.binary.version}</artifactId>
+<version>${flink.version}</version>
+</dependency>
+```
+
+对于 Elasticsearch 7 以上的版本：
+
+```xml
+<dependency>
+ <groupId>org.apache.flink</groupId> 
+<artifactId>flink-connector-elasticsearch7_${scala.binary.version}</artifactId>
+<version>${flink.version}</version>
+</dependency>
+```
+
+#### 11.9.4.2 创建连接到 Elasticsearch 的表
+
+创建 Elasticsearch 表的方法与 JDBC 表基本一致
+
+```sql
+-- 创建一张连接到 Elasticsearch 的 表
+CREATE TABLE MyTable (
+ user_id STRING,
+ user_name STRING
+ uv BIGINT,
+ pv BIGINT,
+ PRIMARY KEY (user_id) NOT ENFORCED
+) WITH (
+ 'connector' = 'elasticsearch-7',
+ 'hosts' = 'http://localhost:9200',
+ 'index' = 'users'
+);
+```
+
+这里定义了主键，所以会以更新插入（Upsert）模式向 Elasticsearch 写入数据。
+
+### 11.9.5 HBase
+
+作为高性能、可伸缩的分布式列存储数据库，HBase 在大数据分析中是一个非常重要的工具。
+
+Flink 提供的 HBase 连接器支持面向 HBase 集群的读写操作。在流处理场景下，连接器作为 TableSink 向 HBase 写入数据时，采用的始终是更新插入（Upsert）模式。即：HBase 要求连接器必须通过定义的主键（primary key）来发送更新日志（changelog）。所以在创建表的 DDL 中，我们必须要定义行键（rowkey）字段，并将它声明为主键；如果没有用 PRIMARY KEY 子句声明主键，连接器会默认把 rowkey 作为主键。
+
+#### 11.9.5.1 引入依赖
+
+目前 Flink 只对 HBase 的1.4.x 和 2.2.x 版本提供了连接器支持，而引入的依赖也应该与具体的 HBase 版本有关
+
+对于1.4 版本：
+
+```xml
+<dependency>
+ <groupId>org.apache.flink</groupId>
+ <artifactId>flink-connector-hbase-1.4_${scala.binary.version}</artifactId>
+ <version>${flink.version}</version>
+</dependency>
+```
+
+对于 HBase 2.2 版本：
+
+```xml
+<dependency>
+ <groupId>org.apache.flink</groupId>
+ <artifactId>flink-connector-hbase-2.2_${scala.binary.version}</artifactId>
+ <version>${flink.version}</version>
+</dependency>
+```
+
+#### 11.9.5.2 创建连接到 HBase 的表
+
+在 DDL创建出的 HBase 表中，所有的列族（column family）都必须声明为 ROW 类型，在表中占据一个字段；而每个 family 中的列（column qualifier）则对应着 ROW 里的嵌套字段。不需要将 HBase 中所有的 family 和 qualifier 都在 Flink SQL 的表中声明出来，只要把那些在查询中用到的声明出来就可以了。
+
+除了所有 ROW 类型的字段（对应着 HBase 中的 family），表中还应有一个原子类型的字段，它就会被识别为 HBase 的 rowkey。在表中这个字段可以任意取名，不一定非要叫 rowkey。
+
+具体示例：
+
+```sql
+-- 创建一张连接到 HBase 的 表
+CREATE TABLE MyTable (
+rowkey INT,
+family1 ROW<q1 INT>,
+family2 ROW<q2 STRING, q3 BIGINT>,
+family3 ROW<q4 DOUBLE, q5 BOOLEAN, q6 STRING>,
+PRIMARY KEY (rowkey) NOT ENFORCED
+) WITH (
+'connector' = 'hbase-1.4',
+'table-name' = 'mytable',
+'zookeeper.quorum' = 'localhost:2181'
+);
+-- 假设表 T 的字段结构是 [rowkey, f1q1, f2q2, f2q3, f3q4, f3q5, f3q6]
+INSERT INTO MyTable
+SELECT rowkey, ROW(f1q1), ROW(f2q2, f2q3), ROW(f3q4, f3q5, f3q6) FROM T;
+```
+
+将另一张 T 中的数据提取出来，并用 ROW()函数来构造出对应的 column family，最终写入 HBase 中名为 mytable 的表。
+
+### 11.9.6 Hive
+
+Flink 与 Hive 的集成比较特别。Flink 提供了“Hive 目录”（HiveCatalog）功能，允许使用Hive 的“元存储”（Metastore）来管理 Flink 的元数据。这带来的好处体现在两个方面：
+
+* Metastore 可以作为一个持久化的目录，因此使用 HiveCatalog 可以跨会话存储 Flink特定的元数据。这样一来，在 HiveCatalog 中执行执行创建 Kafka 表或者 ElasticSearch 表，就可以把它们的元数据持久化存储在 Hive 的 Metastore 中；对于不同的作业会话就不需要重复创建了，直接在 SQL 查询中重用就可以。
+
+* 使用 HiveCatalog，Flink 可以作为读写 Hive 表的替代分析引擎。这样一来，在 Hive中进行批处理会更加高效；与此同时，也有了连续在 Hive 中读写数据、进行流处理的能力，这也使得“实时数仓”（real-time data warehouse）成为了可能。
+
+HiveCatalog 被设计为“开箱即用”，与现有的 Hive 配置完全兼容，不需要做任何的修改与调整就可以直接使用。注意只有 Blink 的计划器（planner）提供了 Hive 集成的支持，所以需要在使用 Flink SQL时选择Blink planner。
+
+#### 11.9.6.1 引入依赖
+
+目前 Flink 支持的 Hive 版本包括：
+
+* Hive 1.x：1.0.0~1.2.2；
+* Hive 2.x：2.0.0~2.2.0 和 2.3.0~2.3.6；
+* Hive 3.x：3.0.0~3.1.2；
+
+由于 Hive 是基于 Hadoop 的组件，因此需要提供 Hadoop 的相关支持，需要设置环境变量
+
+```bash
+export HADOOP_CLASSPATH=`hadoop classpath`
+```
+
+在 Flink 程序中可以引入以下依赖：
+
+```xml
+<!-- Flink 的 Hive 连接器-->
+<dependency>
+ <groupId>org.apache.flink</groupId>
+ <artifactId>flink-connector-hive_${scala.binary.version}</artifactId>
+ <version>${flink.version}</version>
+</dependency>
+<!-- Hive 依赖 -->
+<dependency>
+ <groupId>org.apache.hive</groupId>
+ <artifactId>hive-exec</artifactId>
+ <version>${hive.version}</version>
+</dependency>
+```
+
+建议不要把这些依赖打包到结果 jar 文件中，而是在运行时的集群环境中为不同的 Hive 版本添加不同的依赖支持。具体版本对应的依赖关系，可以查询官网说明。
+
+#### 11.9.6.2 连接到 Hive
+
+在 Flink 中连接 Hive，是通过在表环境中配置 HiveCatalog 来实现的。
+
+配置 HiveCatalog 本身并不需要限定使用哪个 planner，不过对 Hive 表的读写操作只有 Blink 的planner 才支持。所以需要将表环境的 planner 设置为 Blink。
+
+代码中配置 Catalog :
+
+```java
+	EnvironmentSettings settings = EnvironmentSettings.newInstance().useBlinkPlanner().build();
+	TableEnvironment tableEnv = TableEnvironment.create(settings);
+	String name = "myhive";
+	String defaultDatabase = "mydatabase";
+	String hiveConfDir = "/opt/hive-conf";
+	// 创建一个 HiveCatalog，并在表环境中注册
+	HiveCatalog hive = new HiveCatalog(name, defaultDatabase, hiveConfDir);
+	tableEnv.registerCatalog("myhive", hive);
+	// 使用 HiveCatalog 作为当前会话的 catalog
+	tableEnv.useCatalog("myhive");
+```
+
+SQL 客户端，用 CREATE CATALOG 语句直接创建 HiveCatalog：
+
+```perl
+Flink SQL> create catalog myhive with ('type' = 'hive', 'hive-conf-dir' = '/opt/hive-conf');
+[INFO] Execute statement succeed.
+Flink SQL> use catalog myhive;
+[INFO] Execute statement succeed.
+```
+
+#### 11.9.6.3 设置 SQL 方言
+
+Flink 目前支持两种 SQL 方言的配置：default（Flink SQL） 和 hive（HQL）。
+
+**1. SQL 中设置**
+
+通过配置 table.sql-dialect 属性来设置 SQL 方言：
+
+```sql
+set table.sql-dialect=hive;
+```
+
+可以在代码中执行上面的 SET 语句，也可以直接启动 SQL 客户端来运行。如果使用 SQL 客户端，还可以在配置文件 sql-cli-defaults.yaml 中通过“configuration”模块来设置：
+
+```yaml
+execution:
+ planner: blink
+ type: batch
+ result-mode: table
+configuration:
+ table.sql-dialect: hive
+```
+
+**2. Table API 中设置**
+
+使用 Table API 获取表环境的配置项来进行设置：
+
+```javascript
+	// 配置 hive 方言
+	tableEnv.getConfig().setSqlDialect(SqlDialect.HIVE);
+	// 配置 default 方言
+	tableEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
+```
+
+#### 11.9.6.4 读写 Hive 表
+
+Flink 支持以批处理和流处理模式向 Hive 中读写数据。在批处理模式下，Flink 会在执行查询语句时对 Hive 表进行一次性读取，在作业完成时将结果数据向 Hive 表进行一次性写入；而在流处理模式下，Flink 会持续监控 Hive 表，在新数据可用时增量读取，也可以持续写入新数据并增量式地让它们可见。
+
+可以随时切换 SQL 方言，从其它数据源（例如 Kafka）读取数据、经转换后再写入Hive。
+
+下面是以纯SQL形式编写的一个示例，可以启动SQL客户端来运行：
+
+```sql
+-- 设置 SQL 方言为 hive，创建 Hive 表
+SET table.sql-dialect=hive;
+CREATE TABLE hive_table (
+ user_id STRING,
+ order_amount DOUBLE
+) PARTITIONED BY (dt STRING, hr STRING) STORED AS parquet TBLPROPERTIES (
+ 'partition.time-extractor.timestamp-pattern'='$dt $hr:00:00',
+ 'sink.partition-commit.trigger'='partition-time',
+ 'sink.partition-commit.delay'='1 h',
+ 'sink.partition-commit.policy.kind'='metastore,success-file'
+);
+-- 设置 SQL 方言为 default，创建 Kafka 表
+SET table.sql-dialect=default;
+CREATE TABLE kafka_table (
+ user_id STRING,
+ order_amount DOUBLE,
+ log_ts TIMESTAMP(3),
+ WATERMARK FOR log_ts AS log_ts - INTERVAL '5' SECOND – 定义水位线
+) WITH (...);
+-- 将 Kafka 中读取的数据经转换后写入 Hive 
+INSERT INTO TABLE hive_table 
+SELECT user_id, order_amount, DATE_FORMAT(log_ts, 'yyyy-MM-dd'), 
+DATE_FORMAT(log_ts, 'HH')
+FROM kafka_table;
+```
+
+这里创建 Hive 表时设置了通过分区时间来触发提交的策略。将 Kafka 中读取的数据经转换后写入 Hive，这是一个流处理的 Flink SQL 程序。
+
+## 11.10 本章总结
+
+* 11.2 节主要介绍 Table API 和 SQL 的基本用法，有了这部分知识，就可以写出完整的 Flink SQL 程序了。
+
+* 11.3 节深入讲解了表和 SQL 在流处理中的一些核心概念，比如动态表和持续查询，更新查询和追加查询等；这些知识或许对于应用逻辑没有太大帮助，却是深入理解流式处理架构的关键，是从程序员向着架构师迈进的路上必须跨越的门槛。
+
+* 11.4~11.6 节主要介绍 Flink SQL 中的高级特性：窗口、聚合查询和联结查询，在这一部分中标准 SQL 语法和Flink 的 DataStream API 彼此渗透融合，在流处理中使用 SQL 查询的特色体现得淋漓尽致；另一方面，这几节也是对 SQL 和 DataStream API 知识的一个总结。
+
+* 11.7 节详细讲解了函数的用法，这部分主要是一个知识扩展，实际应用的场景较少，一般只需要知道系统函数的用法就够了。
+
+* 11.8、11.9 两节介绍了 SQL 客户端工具和外部系统的连接器，内容相对比较简单，主要侧重于实际应用场景。
+
+本章内容较多，如果仅以快速应用为目的，可以主要浏览 11.1、11.2、11.4、11.5、11.9 这五节内容；
+
+# 12 Flink CEP
+
+在大数据分析领域，一大类需求就是诸如 PV、UV 这样的统计指标，往往可以直接写 SQL 搞定；对于比较复杂的业务逻辑，SQL 中可能没有对应功能的内置函数，也可以使用 DataStream API，利用状态编程来进行实现。不过在实际应用中，还有一类需求是要检测以特定顺序先后发生的一组事件，进行统计或做报警提示，这就比较麻烦了。
+
+多个事件的组合，我们把它叫作“复杂事件”。对于复杂时间的处理，由于涉及到事件的严格顺序，有时还有时间约束，很难直接用 SQL 或者 DataStream API 来完成。就算底层的处理函数（process function）可以搞定这些需求，但对于非常复杂的组合事件，可能会使代码失去可读性。
+
+Flink 为此提供了专门用于处理复杂事件的库——CEP，可以更加轻松地解决这类棘手的问题。这在企业的实时风险控制中有非常重要的作用。
+
+## 12.1 基本概念
+
+### 12.1.1 CEP 是什么
+
+“复杂事件处理（Complex Event Processing）”的缩写；
+
+Flink CEP，是 Flink 实现的一个用于复杂事件处理的库（library）
+
+复杂事件处理：可以在事件流里，检测到特定的事件组合并进行处理，比如说“连续登录失败”，或者“订单支付超时”等等。
+
+复杂事件处理（CEP）的流程可以分成三个步骤：
+
+* 定义一个匹配规则
+
+* 将匹配规则应用到事件流上，检测满足规则的复杂事件
+
+* 对检测到的复杂事件进行处理，得到结果进行输出
+
+![image-20221127140634976](../../images/image-20221127140634976.png)
+
+CEP 是针对流处理而言的，分析的是低延迟、频繁产生的事件流。它的主要目的，就是在无界流中检测出特定的**数据组合**，让我们有机会掌握数据中重要的高阶特征。
+
+### 12.1.2 模式（Pattern）
+
+CEP 的第一步所定义的匹配规则叫作“模式”（Pattern），模式的定义主要是两部分内容：
+
+* 每个简单事件的特征
+
+* 简单事件之间的组合关系
+
+可以进一步扩展模式的功能。比如，匹配检测的时间限制；每个简单事件是否可以重复出现；对于事件可重复出现的模式，遇到一个匹配后是否跳过后面的匹配；等等。
+
+所谓“事件之间的组合关系”，一般就是定义“谁后面接着是谁”，也就是事件发生的顺序。叫作“近邻关系”。可以定义严格的近邻关系，也就是两个事件之前不能有任何其他事件；也可以定义宽松的近邻关系，即只要前后顺序正确即可，中间可以有其他事件。
+
+另外，还可以反向定义，也就是“谁后面不能跟着谁”。CEP 做的事其实就是在流上进行模式匹配。根据模式的近邻关系条件不同，可以检测连续的事件或不连续但先后发生的事件；模式还可能有时间的限制，如果在设定时间范围内没有满足匹配条件，就会导致模式匹配超时（timeout）。
+
+Flink CEP 提供了丰富的 API，可以实现上面关于模式的所有功能，这套 API 就叫作“模式 API”（Pattern API）。
+
+### 12.1.3 应用场景
+
+* 风险控制
+
+设定一些行为模式，可以对用户的异常行为进行实时检测。当一个用户行为符合了异常行为模式，比如短时间内频繁登录并失败、大量下单却不支付（刷单），就可以向用户发送通知信息，或是进行报警提示、由人工进一步判定用户是否有违规操作的嫌疑。这样就可以有效地控制用户个人和平台的风险。
+
+* 用户画像
+
+利用 CEP 可以用预先定义好的规则，对用户的行为轨迹进行实时跟踪，从而检测出具有特定行为习惯的一些用户，做出相应的用户画像。基于用户画像可以进行精准营销，即对行为匹配预定义规则的用户实时发送相应的营销推广；这与目前很多企业所做的精准推荐原理是一样的。
+
+* 运维监控
+
+对于企业服务的运维管理，可以利用 CEP 灵活配置多指标、多依赖来实现更复杂的监控模式。
+
+CEP 的应用场景非常丰富。很多大数据框架，如 Spark、Samza、Beam 等都提供了不同的CEP 解决方案，但没有专门的库（library）。而 Flink 提供了专门的 CEP 库用于复杂事件处理，可以说是目前 CEP 的最佳解决方案。
+
+## 12.2 快速上手
+
+### 12.2.1 引入依赖
+
+```xml
+<dependency>
+ <groupId>org.apache.flink</groupId>
+ <artifactId>flink-cep_${scala.binary.version}</artifactId>
+ <version>${flink.version}</version>
+</dependency>
+```
+
+为了精简和避免依赖冲突，Flink 会保持尽量少的核心依赖。所以核心依赖中并不包括任何的连接器（conncetor）和库，这里的库就包括了 SQL、CEP 以及 ML 等等。所以如果想要在 Flink 集群中提交运行 CEP 作业，应该向 Flink SQL 那样将依赖的 jar 包放在/lib 目录下。
+
+Flink CEP 和 Flink SQL 一样，都是最顶层的应用级 API。
+
+### 12.2.2 简单实例
+
+需求：检测用户行为，如果连续三次登录失败，就输出报警信息。
+
+首先定义数据的类型。这里的用户行为不再是之前的访问事件 Event 了，所以应该单独定义一个登录事件 POJO 类：
+
+```java
+package org.neptune.pojo;
+
+public class LoginEvent {
+    public String userId;
+    public String ipAddress;
+    public String eventType;
+    public Long timestamp;
+
+    public LoginEvent(String userId, String ipAddress, String eventType, Long
+            timestamp) {
+        this.userId = userId;
+        this.ipAddress = ipAddress;
+        this.eventType = eventType;
+        this.timestamp = timestamp;
+
+    }
+
+    public LoginEvent() {
+    }
+
+    @Override
+    public String toString() {
+        return "LoginEvent{" +
+                "userId='" + userId + '\'' +
+                ", ipAddress='" + ipAddress + '\'' +
+                ", eventType='" + eventType + '\'' +
+                ", timestamp=" + timestamp +
+                '}';
+    }
+}
+```
+
+CEP 的主要处理流程分为三步，对应到 Pattern API 中就是：
+
+* 定义一个模式（Pattern）；
+
+* 将Pattern应用到DataStream上，检测满足规则的复杂事件，得到一个PatternStream；
+
+* 对 PatternStream 进行转换处理，将检测到的复杂事件提取出来，包装成报警信息输出。
+
+具体代码实现如下：
+
+```java
+package org.neptune.CEP;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.cep.CEP;
+import org.apache.flink.cep.PatternSelectFunction;
+import org.apache.flink.cep.PatternStream;
+import org.apache.flink.cep.pattern.Pattern;
+import org.apache.flink.cep.pattern.conditions.SimpleCondition;
+import org.apache.flink.streaming.api.datastream.KeyedStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.neptune.pojo.LoginEvent;
+
+import java.util.List;
+import java.util.Map;
+
+public class LoginFailDetect {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        // 获取登录事件流，并提取时间戳、生成水位线
+        KeyedStream<LoginEvent, String> stream = env
+                .fromElements(
+                        new LoginEvent("user_1", "192.168.0.1", "fail", 2000L),
+                        new LoginEvent("user_1", "192.168.0.2", "fail", 3000L),
+                        new LoginEvent("user_2", "192.168.1.29", "fail", 4000L),
+                        new LoginEvent("user_1", "171.56.23.10", "fail", 5000L),
+                        new LoginEvent("user_2", "192.168.1.29", "success", 6000L),
+                        new LoginEvent("user_2", "192.168.1.29", "fail", 7000L),
+                        new LoginEvent("user_2", "192.168.1.29", "fail", 8000L)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy.<LoginEvent>forMonotonousTimestamps()
+                                .withTimestampAssigner(
+                                        new SerializableTimestampAssigner<LoginEvent>() {
+                                            @Override
+                                            public long extractTimestamp(LoginEvent loginEvent, long l) {
+                                                return loginEvent.timestamp;
+                                            }
+                                        }
+                                )
+                )
+                .keyBy(r -> r.userId);
+        // 1. 定义 Pattern，连续的三个登录失败事件
+        Pattern<LoginEvent, LoginEvent> pattern = Pattern
+                .<LoginEvent>begin("first") // 以第一个登录失败事件开始
+                .where(new SimpleCondition<LoginEvent>() {
+                    @Override
+                    public boolean filter(LoginEvent loginEvent) throws Exception {
+                        return loginEvent.eventType.equals("fail");
+                    }
+                })
+                .next("second") // 接着是第二个登录失败事件
+                .where(new SimpleCondition<LoginEvent>() {
+                    @Override
+                    public boolean filter(LoginEvent loginEvent) throws Exception {
+                        return loginEvent.eventType.equals("fail");
+                    }
+                })
+                .next("third") // 接着是第三个登录失败事件
+                .where(new SimpleCondition<LoginEvent>() {
+                    @Override
+                    public boolean filter(LoginEvent loginEvent) throws Exception {
+                        return loginEvent.eventType.equals("fail");
+                    }
+                });
+        // 2. 将 Pattern 应用到流上，检测匹配的复杂事件，得到一个 PatternStream
+        PatternStream<LoginEvent> patternStream = CEP.pattern(stream, pattern);
+
+        // 3. 将匹配到的复杂事件选择出来，然后包装成字符串报警信息输出
+        patternStream
+                .select(new PatternSelectFunction<LoginEvent, String>() {
+                    @Override
+                    public String select(Map<String, List<LoginEvent>> map) throws Exception {
+                        LoginEvent first = map.get("first").get(0);
+                        LoginEvent second = map.get("second").get(0);
+                        LoginEvent third = map.get("third").get(0);
+                        return first.userId + " 连续三次登录失败！登录时间：" +
+                                first.timestamp + ", " + second.timestamp + ", " + third.timestamp;
+                    }
+                })
+                .print("warning");
+        env.execute();
+    }
+}
+```
+
+模式中的每个简单事件，会用一个.where()方法来指定一个约束条件，指明每个事件的特征，这里就是 eventType 为“fail”。
+
+而模式里表示事件之间的关系时，使用了 .next() 方法。next 是“下一个”的意思，表示紧挨着、中间不能有其他事件（比如登录成功），这是一个严格近邻关系。第一个事件用.begin()方法表示开始。所有这些“连接词”都可以有一个字符串作为参数，这个字符串就可以认为是当前简单事件的名称。所以我们如果检测到一组匹配的复杂事件，里面就会有连续的三个登录失败事件，它们的名称分别叫作“first”，“second”和“third”。
+
+第三步处理复杂事件时，调用了PatternStream的.select() 方法，传入一个PatternSelectFunction 对检测到的复杂事件进行处理。而检测到的复杂事件，会放在一个 Map中；PatternSelectFunction 内.select()方法有一个类型为 Map<String, List<LoginEvent>>的参数map，里面就保存了检测到的匹配事件。这里的 key 是一个字符串，对应着事件的名称，而 value是 LoginEvent 的一个列表，匹配到的登录失败事件就保存在这个列表里。最终我们提取 userId和三次登录的时间戳，包装成字符串输出一个报警信息。
+
+运行代码结果如下：
+
+```powershell
+warning> user_1 连续三次登录失败！登录时间：2000, 3000, 5000
+```
+
+## 12.3 模式 API（Pattern API）
+
+Pattern API 可以定义各种复杂的事件组合规则，用于从事件流中提取复杂事件。
+
+### 12.3.1 个体模式
+
+由于流中事件的匹配是有先后顺序的，因此一个匹配规则就可以表达成先后发生的一个个简单事件，按顺序串联组合在一起。
+
+这里的每一个简单事件并不是任意选取的，也需要有一定的条件规则；每个简单事件的匹配规则，叫作“个体模式”（Individual Pattern）。
+
+#### 12.3.1.1 基本形式
+
+12.2.2 小节中，每一个登录失败事件的选取规则，都是一个个体模式。
+
+```java
+	 .<LoginEvent>begin("first") // 以第一个登录失败事件开始
+ 	  .where(new SimpleCondition<LoginEvent>() {
+	@Override
+ 	 public boolean filter(LoginEvent loginEvent) throws Exception {
+ 	 return loginEvent.eventType.equals("fail");
+ 	 }
+ })
+```
+
+或
+
+```java
+	.next("second") // 接着是第二个登录失败事件
+	.where(new SimpleCondition<LoginEvent>() {
+ 	 @Override
+ 	 public boolean filter(LoginEvent loginEvent) throws Exception {
+ 	 return loginEvent.eventType.equals("fail");
+ 	}
+ })
+```
+
+这些都是个体模式。个体模式一般都会匹配接收一个事件。
+
+每个个体模式都以一个“连接词”开始定义的，比如 begin、next 等等，这是 Pattern 对象的一个方法（begin 是 Pattern 类的静态方法），返回的还是一个 Pattern。这些“连接词”方法有一个 String 类型参数，这就是当前个体模式唯一的名字，比如这里的“first”、“second”。在之后检测到匹配事件时，就会以这个名字来指代匹配事件。
+
+个体模式需要一个“过滤条件”，用来指定具体的匹配规则。这个条件一般是通过调用.where()方法来实现的，具体的过滤逻辑则通过传入的 SimpleCondition 内的.filter()方法来定义。
+
+个体模式可以匹配接收一个事件，也可以接收多个事件。可以给个体模式增加一个“量词”（quantifier），就能够让它进行循环匹配，接收多个事件。
+
+#### 12.3.1.2  量词（Quantifiers ）
+
+个体模式后面可以跟一个“量词”，用来指定循环的次数。
+
+从这个角度分类，个体模式可以包括“单例（singleton）模式”和“循环（looping）模式”：
+
+* 默认情况下，个体模式是单例模式，匹配接收一个事件；
+* 定义了量词之后，就变成了循环模式，可以匹配接收多个事件。在循环模式中，对同样特征的事件可以匹配多次。比如我们定义个体模式为“匹配形状为三角形的事件”，再让它循环多次，就变成了“匹配连续多个三角形的事件”。注意这里的“连续”，只要保证前后顺序即可，中间可以有其他事件，所以是“宽松近邻”关系。
+
+在 Flink CEP 中，可以使用不同的方法指定循环模式：
+
+* .oneOrMore（）
+
+匹配事件出现一次或多次，假设 a 是一个个体模式，a.oneOrMore()表示可以匹配 1 个或多个 a 的事件组合。我们有时会用 a+来简单表示。
+
+* .times（times）
+
+匹配事件发生特定次数（times），例如 a.times(3)表示 aaa；
+
+* .times（fromTimes，toTimes）
+
+指定匹配事件出现的次数范围，最小次数为fromTimes，最大次数为toTimes。例如a.times(2, 4)可以匹配 aa，aaa 和 aaaa。
+
+* .greedy()
+
+只能用在循环模式后，使当前循环模式变得“贪心”（greedy），也就是总是尽可能多地去匹配。例如 a.times(2, 4).greedy()，如果出现了连续 4 个 a，那么会直接把 aaaa 检测出来进行处理，其他任意 2 个 a 是不算匹配事件的。
+
+* .optional()
+
+使当前模式成为可选的，也就是说可以满足这个匹配条件，也可以不满足。
+
+对于一个个体模式 pattern 来说，后面所有可以添加的量词如下：
+
+```javascript
+// 匹配事件出现 4 次
+pattern.times(4);
+// 匹配事件出现 4 次，或者不出现
+pattern.times(4).optional();
+// 匹配事件出现 2, 3 或者 4 次
+pattern.times(2, 4);
+// 匹配事件出现 2, 3 或者 4 次，并且尽可能多地匹配
+pattern.times(2, 4).greedy();
+// 匹配事件出现 2, 3, 4 次，或者不出现
+pattern.times(2, 4).optional();
+// 匹配事件出现 2, 3, 4 次，或者不出现；并且尽可能多地匹配
+pattern.times(2, 4).optional().greedy();
+// 匹配事件出现 1 次或多次
+pattern.oneOrMore();
+// 匹配事件出现 1 次或多次，并且尽可能多地匹配
+pattern.oneOrMore().greedy();
+// 匹配事件出现 1 次或多次，或者不出现
+pattern.oneOrMore().optional();
+// 匹配事件出现 1 次或多次，或者不出现；并且尽可能多地匹配
+pattern.oneOrMore().optional().greedy();
+// 匹配事件出现 2 次或多次
+pattern.timesOrMore(2);
+// 匹配事件出现 2 次或多次，并且尽可能多地匹配
+pattern.timesOrMore(2).greedy();
+// 匹配事件出现 2 次或多次，或者不出现
+pattern.timesOrMore(2).optional()
+// 匹配事件出现 2 次或多次，或者不出现；并且尽可能多地匹配
+pattern.timesOrMore(2).optional().greedy();
+```
+
+不定义量词，都是单例模式，只会匹配一个事件，每个 List 中也只有一个元素：
+
+```java
+LoginEvent first = map.get("first").get(0);
+```
+
+#### 12.3.1.3 条件（Conditions）
+
+对于条件的定义，主要是通过调用 Pattern 对象的.where()方法来实现的，主要可以分为简单条件、迭代条件、复合条件、终止条件几种类型。此外，也可以调用 Pattern 对象的.subtype()方法来限定匹配事件的子类型。
+
+##### 12.3.1.3.1 限定子类型
+
+调用.subtype()方法可以为当前模式增加子类型限制条件。
+
+```java
+pattern.subtype(SubEvent.class);
+```
+
+这里 SubEvent 是流中数据类型 Event 的子类型。这时，只有当事件是 SubEvent 类型时，才可以满足当前模式 pattern 的匹配条件。
+
+##### 12.3.1.3.2 简单条件（Simple Conditions）
+
+只根据**当前事件**的特征来决定是否接受它。本质上其实就是一个 filter 操作。
+
+为.where()方法传入一个 SimpleCondition 的实例作为参数。SimpleCondition 是表示“简单条件”的抽象类，内部有一个.filter()方法，唯一的参数就是当前事件，可以当作 FilterFunction 来使用。
+
+```java
+	pattern.where(new SimpleCondition<Event>() {
+ 	 @Override
+ 	 public boolean filter(Event value) {
+        //匹配事件的 user 属性以“A”开头
+ 	 return value.user.startsWith("A");
+	}
+});
+```
+
+##### 12.3.1.3.3 迭代条件（Iterative Conditions）
+
+依靠之前事件来做判断的条件，就叫作“迭代条件”（Iterative Condition）。
+
+在 IterativeCondition 中同样需要实现一个 filter()方法，这个方法有两个参数：除了当前事件之外，还有一个上下文 Context。调用这个上下文的.getEventsForPattern()方法，传入一个模式名称，就可以拿到这个模式中已匹配到的所有数据了。
+
+```java
+middle.oneOrMore()
+ 	.where(new IterativeCondition<Event>() {
+ 	@Override
+ 	public boolean filter(Event value, Context<Event> ctx) throws Exception {
+ 	// 事件中的 user 必须以 A 开头
+ 	if (!value.user.startsWith("A")) {
+ 	return false;
+ 	}
+ 
+ 	int sum = value.amount;
+ 	// 获取当前模式之前已经匹配的事件，求所有事件 amount 之和
+ 	for (Event event : ctx.getEventsForPattern("middle")) {
+ 	sum += event.amount;
+ 	}
+ 	// 在总数量小于 100 时，当前事件满足匹配规则，可以匹配成功
+ 	return sum < 100;
+ 	}
+ });
+```
+
+上面代码中当前模式名称就叫作“middle”，这是一个循环模式，可以接受事件发生一次或多次。
+
+下面的迭代条件中，可以通过 ctx.getEventsForPattern("middle")获取当前模式已接受的事件，计算它们的数量（amount）之和；再加上当前事件中的数量，如果总和小于100，就接受当前事件，否则就不匹配。
+
+在迭代条件中也可以基于当前事件做出判断，如 user 必须以 A 开头。最终匹配规则是：事件的 user 必须以 A 开头；并且循环匹配的所有事件 amount 之和必须小于 100。这里的 Event 与之前定义的 POJO 不同，增加了 amount 属性。可以看到，迭代条件能够获取已经匹配的事件，如果自身又是循环模式（比如量词oneOrMore），那么两者结合就可以捕获自身之前接收的数据，据此来判断是否接受当前事件。
+
+这个功能非常强大，可以由此实现更加复杂的需求，比如可以要求“只有大于之前数据的平均值，才接受当前事件”。另外迭代条件中的上下文 Context 也可以获取到时间相关的信息，比如事件的时间戳和当前的处理时间（processing time）。
+
+##### 12.3.1.3.4 组合条件（Combining Conditions）
+
+一个个体模式有多个限定条件，可以独立定义多个条件，然后在外部把它们连接起来，构成一个“组合条件”（Combining Condition）
+
+* 逻辑与（AND）：.where()后面再接一个.where()
+
+* 逻辑或（OR）：.where()后加一个.or()来实现。这里的.or()方法与.where()一样，传入一个 IterativeCondition 作为参数，定义一个独立的条件；它和之前.where()定义的条件只要满足一个，当前事件就可以成功匹配。
+
+子类型限定条件（subtype）也可以和其他条件结合起来，成为组合条件：
+
+```java
+pattern.subtype(SubEvent.class)
+	.where(new SimpleCondition<SubEvent>() {
+ 	 @Override
+ 	 public boolean filter(SubEvent value) {
+ 	 return ... // some condition
+ 	 }
+});
+```
+
+SimpleCondition 的泛型参数也变成了 SubEvent，所以匹配出的事件就既满足子类型限制，又符合过滤筛选的简单条件；这是一个逻辑与的关系。
+
+##### 12.3.1.3.5 终止条件（Stop Conditions）
+
+遇到某个特定事件时当前模式就不再继续循环匹配了。
+
+终止条件的定义是通过调用模式对象的.until()方法来实现的，同样传入一个IterativeCondition作为参数。
+
+注意：终止条件只与oneOrMore()或者oneOrMore().optional()结合使用。
+
+因为在这种循环模式下，不知道后面还有没有事件可以匹配，只好把之前匹配的事件作为状态缓存起来继续等待，这等待无穷无尽；如果一直等下去，缓存的状态越来越多，最终会耗尽内存。所以这种循环模式必须有个终点，当.until()指定的条件满足时，循环终止，这样就可以清空状态释放内存了。
+
+### 12.3.2 组合模式
+
+将多个个体模式组合起来的完整模式，就叫作“组合模式”（Combining Pattern），为了跟个体模式区分有时也叫作“模式序列”（Pattern Sequence）。
+
+一个组合模式有以下形式：
+
+```java
+Pattern<Event, ?> pattern = Pattern
+	 						.<Event>begin("start").where(...)
+ 							.next("next").where(...)
+ 							.followedBy("follow").where(...)
+ 							...
+```
+
+#### 12.3.2.1 初始模式（Initial Pattern）
+
+所有的组合模式，都必须以一个“初始模式”开头；而初始模式必须通过调用 Pattern 的静态方法.begin()来创建：
+
+```java
+Pattern<Event, ?> start = Pattern.<Event>begin("start");
+```
+
+* 传入的 String 类型的参数是模式的名称；
+
+*  begin 方法需要传入一个类型参数，这是模式要检测流中事件的基本类型，这里定义为 Event。调用的结果返回一个 Pattern 的对象实例。
+
+* Pattern 有两个泛型参数：
+  * 第一个是检测事件的基本类型 Event，跟 begin 指定的类型一致；
+  * 第二个则是当前模式里事件的子类型，由子类型限制条件指定。这里用类型通配符（？）代替，就可以从上下文直接推断了。
+
+#### 12.3.2.2 近邻条件（Contiguity Conditions）
+
+模式之间的组合是通过一些“连接词”方法实现的，这些连接词指明了先后事件之间有着怎样的近邻关系，这就是所谓的“近邻条件”（Contiguity Conditions，也叫“连续性条件”）。
+
+Flink CEP 中提供了三种近邻关系：
+
+
+
+
+
