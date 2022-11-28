@@ -1807,6 +1807,28 @@ say_hi.stdout_lines[0]【hello world】
         - debug: msg="{{var2}} {{var1}}"
 ```
 
+#### ansible获取json value（带点号的key)
+
+```yaml
+---
+- name: Get "Request ID" from JSON
+  hosts: all
+  connection: local
+  gather_facts: no
+  vars_files:
+    - ./secret.yml
+  vars:
+    op_content_file: ./files/op_content.json
+  tasks:
+    - name: Read JSON file
+      set_fact:
+        op_content: '{{ lookup("file", op_content_file) }}'
+
+    - name: Get RequestID from op_content variable
+      set_fact:
+        request_id: "{{ op_content | json_query('\"op.content\".entries[0].values.\"Request ID\"') }}"
+```
+
 #### ansible循环引用变量元组与when判断语句
 
 ```yaml

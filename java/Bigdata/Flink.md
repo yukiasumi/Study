@@ -2992,9 +2992,17 @@ hbase:004:0>
 
 ## 6.1 时间语义
 
-- 事件时间（Event Time）：事件创建的时间
-- 处理时间（Processing Time）：执行操作算子的本地系统时间，与机器相关
-- 摄入时间（Ingestion Time）：数据进入Flink的时间
+### 6.1.1 事件时间（Event Time）
+
+事件创建的时间
+
+### 6.1.2 处理时间（Processing Time）
+
+执行操作算子的本地系统时间，与机器相关
+
+### 6.1.3 摄入时间（Ingestion Time）
+
+数据进入Flink的时间
 
 1.12 版本开始，Flink 已经将事件时间作为了默认的时间语义。
 
@@ -10783,7 +10791,738 @@ Pattern<Event, ?> start = Pattern.<Event>begin("start");
 
 Flink CEP 中提供了三种近邻关系：
 
+* 严格近邻（Strict Contiguity）：匹配的事件严格地按顺序一个接一个出现，中间不会有任何其他事件。代码中对应的就是 Pattern 的.next()方法
+* 宽松近邻（Relaxed Contiguity）：只关心事件发生的顺序，而放宽了对匹配事件的“距离”要求，两个匹配的事件之间可以有其他不匹配的事件出现。代码中对应.followedBy()方法
 
+![image-20221128093845171](../../images/image-20221128093845171.png)
 
+* 非确定性宽松近邻（Non-Deterministic Relaxed Contiguity）：“非确定性”是指可以重复使用之前已经匹配过的事件；这种近邻条件下匹配到的不同复杂事件，可以以同一个事件作为开始，所以匹配结果一般会比宽松近邻更多。代码中对应.followedByAny()方法。
 
+![image-20221128094205332](../../images/image-20221128094205332.png)
 
+  
+
+#### 12.3.2.3 其他限制条件
+
+还可以用否定的“连接词”来组合个体模式：
+
+* .notNext()：表示前一个模式匹配到的事件后面，不能紧跟着某种事件。
+
+* .notFollowedBy()：表示前一个模式匹配到的事件后面，不会出现某种事件。
+
+  注意：一个模式序列不能以 notFollowedBy()结尾，这个限定条件主要用来表示“两个事件中间不会出现某种事件”。
+
+* .within()：为模式指定一个时间限制，方法传入一个时间参数，这是模式序列中第一个事件到最后一个事件之间的最大时间间隔，只有在这期间成功匹配的复杂事件才是有效的。一个模式序列中只能有一个时间限制，调
+
+  用.within()的位置不限；如果多次调用则会以最小的那个时间间隔为准。
+
+模式序列中所有限制条件在代码中的定义：
+
+```java
+// 严格近邻条件
+Pattern<Event, ?> strict = start.next("middle").where(...);
+// 宽松近邻条件
+Pattern<Event, ?> relaxed = start.followedBy("middle").where(...);
+// 非确定性宽松近邻条件
+Pattern<Event, ?> nonDetermin = 
+start.followedByAny("middle").where(...);
+// 不能严格近邻条件
+Pattern<Event, ?> strictNot = start.notNext("not").where(...);
+// 不能宽松近邻条件
+Pattern<Event, ?> relaxedNot = start.notFollowedBy("not").where(...);
+// 时间限制条件
+middle.within(Time.seconds(10));
+```
+
+#### 12.3.2.4 循环模式中的近邻条件
+
+在循环模式中，近邻关系同样有三种：严格近邻、宽松近邻以及非确定性宽松近邻。
+
+对于定义了量词（如 oneOrMore()、times()）的循环模式，默认内部采用的是宽松近邻。
+
+* .consecutive()：为循环模式中的匹配事件增加严格的近邻条件，保证所有匹配事件是严格连续的。
+
+```java
+// 1. 定义 Pattern，登录失败事件，循环检测 3 次
+Pattern<LoginEvent, LoginEvent> pattern =
+Pattern
+ 	.<LoginEvent>begin("fails")
+ 	.where(new SimpleCondition<LoginEvent>() {
+ 	@Override
+ 	public boolean filter(LoginEvent loginEvent) throws Exception {
+ 	return loginEvent.eventType.equals("fail");
+ 	}
+ }).times(3).consecutive();
+```
+
+* .allowCombinations()：为循环模式中的事件指定非确定性宽松近邻条件，可以重复使用已经匹配的事件。
+
+### 12.3.3 模式组
+
+复杂场景中，需要划分多个“阶段”，每个“阶段”又有一连串的匹配规则。可以以“嵌套”的方式来定义模式。
+
+以一个模式序列作为参数，将模式序列连接组合起来得到的就是一个“模式组”（Groups of Patterns）。
+
+在模式组中，每一个模式序列就被当作了某一阶段的匹配条件，返回的类型是一个GroupPattern。而 GroupPattern 本身是 Pattern 的子类；所以个体模式和组合模式能调用的方法，比如 times()、oneOrMore()、optional()之类的量词，模式组一般也是可以用的。
+
+在代码中应用：
+
+```java
+// 以模式序列作为初始模式
+Pattern<Event, ?> start = Pattern.begin(
+Pattern.<Event>begin("start_start").where(...)
+.followedBy("start_middle").where(...)
+);
+// 在 start 后定义严格近邻的模式序列，并重复匹配两次
+Pattern<Event, ?> strict = start.next(
+Pattern.<Event>begin("next_start").where(...)
+.followedBy("next_middle").where(...)
+).times(2);
+// 在 start 后定义宽松近邻的模式序列，并重复匹配一次或多次
+Pattern<Event, ?> relaxed = start.followedBy(
+Pattern.<Event>begin("followedby_start").where(...)
+.followedBy("followedby_middle").where(...)
+).oneOrMore();
+//在 start 后定义非确定性宽松近邻的模式序列，可以匹配一次，也可以不匹配
+Pattern<Event, ?> nonDeterminRelaxed = start.followedByAny(
+Pattern.<Event>begin("followedbyany_start").where(...)
+.followedBy("followedbyany_middle").where(...)
+).optional();
+```
+
+### 12.3.4 匹配后跳过策略
+
+“匹配后跳过策略”（After Match Skip Strategy）可以精确控制事件的匹配应该跳过哪些情况，精准控制循环模式的匹配结果。这个策略可以在 Pattern 的初始模式定义中，作为 begin()的第二个参数传入：
+
+```java
+Pattern.begin("start", AfterMatchSkipStrategy.noSkip())
+.where(...)
+ ...
+```
+
+匹配后跳过策略 AfterMatchSkipStrategy 是一个抽象类，它有多个具体的实现，可以通过调用对应的静态方法来返回对应的策略实例。这里配置的是不做跳过处理，这也是默认策略。
+
+需要检测的复杂事件模式为：开始是用户名为 a 的事件（简写为事件 a，下同），可以重复一次或多次；然后跟着一个用户名为 b 的事件，a 事件和 b 事件之间可以有其他事件（宽松近邻）。用简写形式可以直接写作：“a+followedBy b”。在代码中定义 Pattern 如下：
+
+```java
+        Pattern.<Event>begin("a").where(new SimpleCondition<Event>() {
+                    @Override
+                    public boolean filter(Event value) throws Exception {
+                        return value.user.equals("a");
+                    }
+                }).oneOrMore()
+                .followedBy("b").where(new SimpleCondition<Event>() {
+                    @Override
+                    public boolean filter(Event value) throws Exception {
+                        return value.user.equals("b");
+                    }
+                });
+```
+
+如果输入事件序列“a a a b”——这里为了区分前后不同的 a 事件，可以记作“a1 a2 a3 b”——那么应该检测到 6 个匹配结果：（a1 a2 a3 b），（a1 a2 b），（a1 b），（a2 a3 b），（a2 b），（a3 b）。如果在初始模式的量词.oneOrMore()后加上.greedy()定义为贪心匹配，那么结果就是：（a1 a2 a3 b），（a2 a3 b），（a3 b），每个事件作为开头只会出现一次。
+
+不同跳过策略对匹配结果的影响：
+
+* 不跳过（NO_SKIP）
+
+代码调用 AfterMatchSkipStrategy.noSkip()。这是默认策略，所有可能的匹配都会输出。会输出完整的 6 个匹配。
+
+* 跳至下一个（SKIP_TO_NEXT）
+
+代码调用 AfterMatchSkipStrategy.skipToNext()。找到一个 a1 开始的最大匹配之后，跳过a1 开始的所有其他匹配，直接从下一个 a2 开始匹配起。当然 a2 也是如此跳过其他匹配。最终得到（a1 a2 a3 b），（a2 a3 b），（a3 b）。跟使用.greedy()效果是相同的。
+
+* 跳过所有子匹配（SKIP_PAST_LAST_EVENT）
+
+代码调用 AfterMatchSkipStrategy.skipPastLastEvent()。找到 a1 开始的匹配（a1 a2 a3 b）之后，直接跳过所有 a1 直到 a3 开头的匹配，相当于把这些子匹配都跳过了。最终得到（a1 a2 a3 b），这是最为精简的跳过策略。
+
+* 跳至第一个（SKIP_TO_FIRST[a]）
+
+代码调用 AfterMatchSkipStrategy.skipToFirst(“a”)，这里传入一个参数，指明跳至哪个模式的第一个匹配事件。找到 a1 开始的匹配（a1 a2 a3 b）后，跳到以最开始一个 a（也就是 a1）为开始的匹配，相当于只留下 a1 开始的匹配。最终得到（a1 a2 a3 b），（a1 a2 b），（a1 b）。
+
+* 跳至最后一个（SKIP_TO_LAST[a]）
+
+代码调用 AfterMatchSkipStrategy.skipToLast(“a”)，同样传入一个参数，指明跳至哪个模式的最后一个匹配事件。找到 a1 开始的匹配（a1 a2 a3 b）后，跳过所有 a1、a2 开始的匹配，跳到以最后一个 a（也就是 a3）为开始的匹配。最终得到（a1 a2 a3 b），（a3 b）。
+
+## 12.4 模式的检测处理
+
+### 12.4.1 将模式应用到流上
+
+将模式应用到事件流上，只要调用 CEP 类的静态方法.pattern()，将数据流（DataStream）和模式（Pattern）作为两个参数传入就可以了。最终得到的是一个 PatternStream：
+
+这里的 DataStream，也可以通过 keyBy 进行按键分区得到 KeyedStream，接下来对复杂事件的检测就会针对不同的 key 单独进行了。
+
+```java
+DataStream<Event> inputStream = ...
+Pattern<Event, ?> pattern = ...
+PatternStream<Event> patternStream = CEP.pattern(inputStream, pattern);
+```
+
+对于时间戳（取决于时间语义）相同或是同时到达的事件，可以在 CEP.pattern()中传入一个比较器作为第三个参数，用来进行更精确的排序：
+
+```java
+// 可选的事件比较器
+EventComparator<Event> comparator = ... 
+PatternStream<Event> patternStream = CEP.pattern(input, pattern, comparator);
+```
+
+### 12.4.2 处理匹配事件
+
+基于 PatternStream 调用一些转换方法，对匹配的复杂事件进行检测和处理，最终转化成 DataStream。
+
+#### 12.4.2.1 匹配事件的选择提取（select）
+
+处理匹配事件最简单的方式，就是从 PatternStream 中直接把匹配的复杂事件提取出来。包装成想要的信息输出
+
+##### 12.4.2.1.1 PatternSelectFunction
+
+代码中基于 PatternStream 直接调用.select()方法，传入一个 PatternSelectFunction 作为参数。
+
+```java
+PatternStream<Event> patternStream = CEP.pattern(inputStream, pattern);
+DataStream<String> result = patternStream.select(new MyPatternSelectFunction());
+```
+
+MyPatternSelectFunction 是 PatternSelectFunction 的一个具体实现 。
+
+PatternSelectFunction 是 Flink CEP 提供的一个函数类接口，它会将检测到的匹配事件保存在一个 Map 里，对应的 key 就是这些事件的名称。这里的“事件名称”就对应着在模式中定义的每个个体模式的名称；而个体模式可以是循环模式，一个名称会对应多个事件，所以最终保存在 Map 里的 value 就是一个事件的列表（List）。
+
+MyPatternSelectFunction：
+
+```java
+class MyPatternSelectFunction implements PatternSelectFunction<Event, String>{
+	@Override
+ 	 public String select(Map<String, List<Event>> pattern) throws Exception {
+ 	 Event startEvent = pattern.get("start").get(0);
+ 	 Event middleEvent = pattern.get("middle").get(0);
+ 	 return startEvent.toString() + " " + middleEvent.toString();
+      }
+}
+```
+
+PatternSelectFunction 里需要实现一个 select()方法，这个方法每当检测到一组匹配的复杂事件时都会调用一次。它以保存了匹配复杂事件的 Map 作为输入，经自定义转换后得到输出信息返回。
+
+这里假设之前定义的模式序列中，有名为“start”和“middle”的两个个体模式，于是可以通过这个名称从 Map 中选择提取出对应的事件。注意调用 Map 的.get(key)方法后得到的是一个事件的 List；如果个体模式是单例的，那么 List 中只有一个元素，直接调用.get(0)就可以把它取出。
+
+如果个体模式是循环的，List 中就有可能有多个元素了。例如在 12.3.2 小节中对连续登录失败检测的改进，可以将匹配到的事件包装成 String 类型的报警信息输出，代码如下：
+
+```java
+ // 1. 定义 Pattern，登录失败事件，循环检测 3 次
+        Pattern<LoginEvent, LoginEvent> pattern = Pattern
+                .<LoginEvent>begin("fails")
+                .where(new SimpleCondition<LoginEvent>() {
+                    @Override
+                    public boolean filter(LoginEvent loginEvent) throws Exception {
+                        return loginEvent.eventType.equals("fail");
+                    }
+                }).times(3).consecutive();
+        // 2. 将 Pattern 应用到流上，检测匹配的复杂事件，得到一个 PatternStream
+        PatternStream<LoginEvent> patternStream = CEP.pattern(stream, pattern);
+        // 3. 将匹配到的复杂事件选择出来，然后包装成报警信息输出
+        patternStream
+                .select(new PatternSelectFunction<LoginEvent, String>() {
+                    @Override
+                    public String select(Map<String, List<LoginEvent>> map) throws Exception {
+                        // 只有一个模式，匹配到了 3 个事件，放在 List 中
+                        LoginEvent first = map.get("fails").get(0);
+                        LoginEvent second = map.get("fails").get(1);
+                        LoginEvent third = map.get("fails").get(2);
+                        return first.userId + " 连续三次登录失败！登录时间：" + first.timestamp
+                                + ", " + second.timestamp + ", " + third.timestamp;
+                    }
+                })
+                .print("warning");
+```
+
+这里定义的模式序列中只有一个循环模式 fails，它会将检测到的 3 个登录失败事件保存到一个列表（List）中。所以第三步处理匹配的复杂事件时，从 map 中获取模式名 fails 对应的事件，拿到的是一个 List，从中按位置索引依次获取元素就可以得到匹配的三个登录失败事件。
+
+##### 12.4.2.1.2 PatternFlatSelectFunction
+
+PatternStream 还有一个类似的方法.flatSelect()，传入的参数是一个PatternFlatSelectFunction。这是 PatternSelectFunction 的“扁平化”版本；内部需要实现一个 flatSelect()方法，它与之前 select()的不同就在于没有返回值，而是多了一个收集器（Collector）参数 out，通过调用 out.collet()方法实现多次发送输出数据。
+
+```java
+        // 3. 将匹配到的复杂事件选择出来，然后包装成报警信息输出
+        patternStream.flatSelect(new PatternFlatSelectFunction<LoginEvent, String>() {
+            @Override
+            public void flatSelect(Map<String, List<LoginEvent>> map, 
+                                   Collector<String> out) throws Exception {
+                LoginEvent first = map.get("fails").get(0);
+                LoginEvent second = map.get("fails").get(1);
+                LoginEvent third = map.get("fails").get(2);
+                out.collect(first.userId + " 连续三次登录失败！登录时间：" + first.timestamp +
+                        ", " + second.timestamp + ", " + third.timestamp);
+            }
+        }).print("warning");
+```
+
+PatternFlatSelectFunction 使用更加灵活，完全能够覆盖 PatternSelectFunction 的功能。
+
+这跟 FlatMapFunction 与 MapFunction 的区别是一样的
+
+#### 12.4.2.2 匹配事件的通用处理（process）
+
+Flink CEP 引入了对于匹配事件的通用检测处理方式，直接调用PatternStream 的.process()方法，传入一个 PatternProcessFunction。类似处理函数（process function），它也可以访问一个上下文（Context），进行更多的操作。
+
+PatternProcessFunction 功能更加丰富、调用更加灵活，可以完全覆盖其他接口，是目前官方推荐的处理方式。
+
+PatternSelectFunction 和 PatternFlatSelectFunction在 CEP 内部执行时也会被转换PatternProcessFunction。
+
+使用 PatternProcessFunction 将之前的代码重写如下：
+
+```java
+        // 3. 将匹配到的复杂事件选择出来，然后包装成报警信息输出
+        patternStream.process(new PatternProcessFunction<LoginEvent, String>() {
+            @Override
+            public void processMatch(Map<String, List<LoginEvent>> map, Context ctx,
+                                     Collector<String> out) throws Exception {
+                LoginEvent first = map.get("fails").get(0);
+                LoginEvent second = map.get("fails").get(1);
+                LoginEvent third = map.get("fails").get(2);
+                out.collect(first.userId + " 连续三次登录失败！登录时间：" + first.timestamp +
+                        ", " + second.timestamp + ", " + third.timestamp);
+            }
+        }).print("warning");
+```
+
+PatternProcessFunction 中必须实现一个 processMatch()方法；这个方法与之前的 flatSelect()类似，只是多了一个上下文 Context 参数。利用这个上下文可以获取当前的时间信息，比如事件的时间戳（timestamp）或者处理时间（processing time）；还可以调用.output()方法将数据输出到侧输出流。
+
+侧输出流的功能是处理函数的一大特性，而在 CEP 中，侧输出流一般被用来处理超时事件。
+
+### 12.4.3 处理超时事件
+
+复杂事件的检测结果一般只有两种：要么匹配，要么不匹配。检测处理的过程具体如下：
+
+1. 如果当前事件符合模式匹配的条件，就接受该事件，保存到对应的 Map 中；
+
+2. 如果在模式序列定义中，当前事件后面还应该有其他事件，就继续读取事件流进行检测；如果模式序列的定义已经全部满足，那么就成功检测到了一组匹配的复杂事件，调用PatternProcessFunction 的 processMatch()方法进行处理；
+
+3. 如果当前事件不符合模式匹配的条件，就丢弃该事件；
+
+4. 如果当前事件破坏了模式序列中定义的限制条件，比如不满足严格近邻要求，那么当前已检测的一组部分匹配事件都被丢弃，重新开始检测。
+
+在有时间限制的情况下，比如用.within()指定了模式检测的时间间隔，超出这个时间当前这组检测就应该失败了。然而这种“超时失败”跟真正的“匹配失败”不同，它其实是一种“部分成功匹配”；因为只有在开头能够正常匹配的前提下，没有等到后续的匹配事件才会超时。所以往往不应该直接丢弃，而是要输出一个提示或报警信息。这需要捕获并处理超时事件。
+
+#### 12.4.3.1 使用 PatternProcessFunction 的侧输出流
+
+在Flink CEP中，提供了一个专门捕捉超时的部分匹配事件的接口，叫作TimedOutPartialMatchHandler。这个接口需要实现一个 processTimedOutMatch()方法，可以将超时的、已检测到的部分匹配事件放在一个 Map 中，作为方法的第一个参数；方法的第二个参数则是 PatternProcessFunction 的上下文 Context。所以这个接口必须与 PatternProcessFunction结合使用，对处理结果的输出则需要利用侧输出流来进行。
+
+代码中调用：
+
+```java
+class MyPatternProcessFunction extends PatternProcessFunction<Event, String>
+                     implements TimedOutPartialMatchHandler<Event> {
+            // 正常匹配事件的处理
+            @Override
+            public void processMatch(Map<String, List<Event>> match, Context ctx,
+                                     Collector<String> out) throws Exception{
+ 					...
+            }
+            // 超时部分匹配事件的处理
+            @Override
+            public void processTimedOutMatch(Map<String, List<Event>> match, Context ctx)
+                    throws Exception{
+                Event startEvent = match.get("start").get(0);
+                OutputTag<Event> outputTag = new OutputTag<Event>("time-out"){};
+                ctx.output(outputTag, startEvent);
+            }
+        }
+```
+
+在 processTimedOutMatch()方法中定义了一个输出标签（OutputTag）。调用 ctx.output()方法，就可以将超时的部分匹配事件输出到标签所标识的侧输出流了。
+
+#### 12.4.3.2 使用 PatternTimeoutFunction
+
+调用 PatternStream 的.select()方法时传入三个参数：侧输出流标签（ OutputTag ）， 超 时 事 件 处 理 函 数 PatternTimeoutFunction ， 匹 配 事 件 提 取 函 数PatternSelectFunction。
+
+代码中调用：
+
+```java
+	// 定义一个侧输出流标签，用于标识超时侧输出流
+        OutputTag<String> timeoutTag = new OutputTag<String>("timeout"){};
+        // 将匹配到的，和超时部分匹配的复杂事件提取出来，然后包装成提示信息输出
+        SingleOutputStreamOperator<String> resultStream = patternStream
+                .select(timeoutTag,
+                        // 超时部分匹配事件的处理
+                        new PatternTimeoutFunction<Event, String>() {
+                            @Override
+                            public String timeout(Map<String, List<Event>> pattern, long
+                                    timeoutTimestamp) throws Exception {
+                                Event event = pattern.get("start").get(0);
+                                return "超时：" + event.toString();
+                            }
+                        },
+                        // 正常匹配事件的处理
+                        new PatternSelectFunction<Event, String>() {
+                            @Override
+                            public String select(Map<String, List<Event>> pattern) throws Exception
+                            {
+                                
+                                ...
+                            }
+                        }
+
+                );
+        // 将正常匹配和超时部分匹配的处理结果流打印输出
+        resultStream.print("matched");
+        resultStream.getSideOutput(timeoutTag).print("timeout");
+```
+
+在超时事件处理的过程中，从 Map 里只能取到已经检测到匹配的那些事件；如果取可能未匹配的事件并调用它的对象方法，则可能会报空指针异常（NullPointerException）。
+
+超时事件处理的结果进入侧输出流，正常匹配事件的处理结果进入主流，两者的数据类型可以不同。
+
+#### 12.4.3.3 应用实例
+
+对订单状态进行监控，设置一个失效时间（比如 15分钟），如果下单后一段时间仍未支付，订单就会被取消。
+
+首先定义出要处理的数据类型。订单事件，主要包括用户对订单的创建（下单）和支付两种行为。因此可以定义 POJO 类 OrderEvent 如下，其中属性字段包括用户 ID、订单 ID、事件类型（操作类型）以及时间戳。
+
+```java
+package org.neptune.pojo;
+
+public class OrderEvent {
+    public String userId;
+    public String orderId;
+    public String eventType;
+    public Long timestamp;
+
+    public OrderEvent() {
+    }
+
+    public OrderEvent(String userId, String orderId, String eventType, Long
+            timestamp) {
+        this.userId = userId;
+        this.orderId = orderId;
+        this.eventType = eventType;
+        this.timestamp = timestamp;
+    }
+
+    @Override
+    public String toString() {
+        return "OrderEvent{" +
+                "userId='" + userId + '\'' +
+                "orderId='" + orderId + '\'' +
+                ", eventType='" + eventType + '\'' +
+                ", timestamp=" + timestamp +
+                '}';
+    }
+}
+```
+
+需求的重点在于对超时未支付的用户进行监控提醒，也就是需要检测有下单行为、但15 分钟内没有支付行为的复杂事件。在下单和支付之间，可以有其他操作（比如对订单的修改），所以两者之间是宽松近邻关系。可以定义 Pattern 如下：
+
+```java
+Pattern<OrderEvent, ?> pattern = Pattern
+                .<OrderEvent>begin("create") // 首先是下单事件
+                .where(new SimpleCondition<OrderEvent>() {
+                    @Override
+                    public boolean filter(OrderEvent value) throws Exception {
+                        return value.eventType.equals("create");
+                    }
+                })
+                .followedBy("pay") // 之后是支付事件；中间可以修改订单，宽松近邻
+                .where(new SimpleCondition<OrderEvent>() {
+                    @Override
+                    public boolean filter(OrderEvent value) throws Exception {
+                        return value.eventType.equals("pay");
+                    }
+                })
+                .within(Time.minutes(15)); // 限制在 15 分钟之内
+```
+
+重点要处理的是超时的部分匹配事件。先对原始的订单事件流按照订单 ID 进行分组，然后检测每个订单的“下单-支付”复杂事件，如果出现超时事件需要输出报警提示信息。
+
+整体代码实现如下：
+
+```java
+package org.neptune.CEP;
+
+import org.apache.flink.api.common.eventtime.SerializableTimestampAssigner;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.cep.CEP;
+import org.apache.flink.cep.PatternSelectFunction;
+import org.apache.flink.cep.PatternStream;
+import org.apache.flink.cep.PatternTimeoutFunction;
+import org.apache.flink.cep.functions.PatternProcessFunction;
+import org.apache.flink.cep.functions.TimedOutPartialMatchHandler;
+import org.apache.flink.cep.pattern.Pattern;
+import org.apache.flink.cep.pattern.conditions.SimpleCondition;
+import org.apache.flink.streaming.api.datastream.KeyedStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
+import org.neptune.pojo.OrderEvent;
+
+import java.util.List;
+import java.util.Map;
+
+public class OrderTimeoutDetect {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        // 获取订单事件流，并提取时间戳、生成水位线
+        KeyedStream<OrderEvent, String> stream = env
+                .fromElements(
+                        new OrderEvent("user_1", "order_1", "create", 1000L),
+                        new OrderEvent("user_2", "order_2", "create", 2000L),
+                        new OrderEvent("user_1", "order_1", "modify", 10 * 1000L),
+                        new OrderEvent("user_1", "order_1", "pay", 60 * 1000L),
+                        new OrderEvent("user_2", "order_3", "create", 10 * 60 * 1000L),
+                        new OrderEvent("user_2", "order_3", "pay", 20 * 60 * 1000L)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy.<OrderEvent>forMonotonousTimestamps()
+                                .withTimestampAssigner(
+                                        new SerializableTimestampAssigner<OrderEvent>() {
+                                            @Override
+                                            public long extractTimestamp(OrderEvent event, long l) {
+                                                return event.timestamp;
+                                            }
+                                        }
+                                )
+                )
+                .keyBy(order -> order.orderId); // 按照订单 ID 分组
+        // 1. 定义 Pattern
+        Pattern<OrderEvent, ?> pattern = Pattern
+                .<OrderEvent>begin("create") // 首先是下单事件
+                .where(new SimpleCondition<OrderEvent>() {
+                    @Override
+                    public boolean filter(OrderEvent value) throws Exception {
+                        return value.eventType.equals("create");
+                    }
+                })
+                .followedBy("pay") // 之后是支付事件；中间可以修改订单，宽松近邻
+                .where(new SimpleCondition<OrderEvent>() {
+                    @Override
+                    public boolean filter(OrderEvent value) throws Exception {
+                        return value.eventType.equals("pay");
+                    }
+                })
+                .within(Time.minutes(15)); // 限制在 15 分钟之内
+        // 2. 将 Pattern 应用到流上，检测匹配的复杂事件，得到一个 PatternStream
+        PatternStream<OrderEvent> patternStream = CEP.pattern(stream, pattern);
+        // 3. 将匹配到的，和超时部分匹配的复杂事件提取出来，然后包装成提示信息输出
+        SingleOutputStreamOperator<String> payedOrderStream =
+                patternStream.process(new OrderPayPatternProcessFunction());
+        // 将正常匹配和超时部分匹配的处理结果流打印输出
+        payedOrderStream.print("payed");
+        OutputTag<String> timeoutTag = new OutputTag<String>("timeout") {};
+        payedOrderStream.getSideOutput(timeoutTag).print("timeout");
+        env.execute();
+    }
+
+    // 实现自定义的 PatternProcessFunction，需实现 TimedOutPartialMatchHandler 接口
+    public static class OrderPayPatternProcessFunction extends
+            PatternProcessFunction<OrderEvent, String> implements
+            TimedOutPartialMatchHandler<OrderEvent> {
+        // 处理正常匹配事件
+        @Override
+        public void processMatch(Map<String, List<OrderEvent>> match, Context ctx,
+                                 Collector<String> out) throws Exception {
+            OrderEvent payEvent = match.get("pay").get(0);
+            out.collect("订单 " + payEvent.orderId + " 已支付！");
+        }
+
+        // 处理超时未支付事件
+        @Override
+        public void processTimedOutMatch(Map<String, List<OrderEvent>> match,
+                                         Context ctx) throws Exception {
+            OrderEvent createEvent = match.get("create").get(0);
+            ctx.output(new OutputTag<String>("timeout") {
+            }, "订单 " +
+                    createEvent.orderId + " 超时未支付！用户为：" + createEvent.userId);
+        }
+    }
+}
+```
+
+输出结果：
+
+```powershell
+payed> 订单 order_1 已支付！
+payed> 订单 order_3 已支付！
+timeout> 订单 order_2 超时未支付！用户为：user_2
+```
+
+分析测试数据：订单 1 和订单 3 都在 15 分钟进行了支付，订单 1 中间的修改行为不会影响结果；而订单 2 未能支付，因此侧输出流输出了一条报警信息。且同一用户可以下多个订单，最后的判断只是基于同一订单做出的。这与预期的效果完全一致。用处理函数进行状态编程，结合定时器也可以实现同样的功能，但明显 CEP 的实现更加方便，也更容易迁移和扩展。
+
+### 12.4.4 处理迟到数据
+
+在 Flink CEP 中沿用了通过设置水位线（watermark）延迟来处理乱序数据的做法。当一个事件到来时，并不会立即做检测匹配处理，而是先放入一个缓冲区（buffer）。缓冲区内的数据，会按照时间戳由小到大排序；当一个水位线到来时，就会将缓冲区中所有时间戳小于水位线的事件依次取出，进行检测匹配。这样就保证了匹配事件的顺序和事件时间的进展一致，处理的顺序就一定是正确的。这里水位线的延迟时间，也就是事件在缓冲区等待的最大时间。
+
+总有数据会迟到，如果不希望迟到数据丢掉，可以借鉴窗口的做法。Flink CEP 提供了将迟到事件输出到侧输出流的方式：可以基于PatternStream直接调用.sideOutputLateData()方法，传入一个 OutputTag，将迟到数据放入侧输出流另行处理。
+
+代码调用：
+
+```java
+        PatternStream<Event> patternStream = CEP.pattern(input, pattern);
+        // 定义一个侧输出流的标签
+        OutputTag<String> lateDataOutputTag = new OutputTag<String>("late-data") {
+        };
+        SingleOutputStreamOperator<ComplexEvent> result = patternStream
+                .sideOutputLateData(lateDataOutputTag) // 将迟到数据输出到侧输出流
+                .select(
+                        // 处理正常匹配数据
+                        new PatternSelectFunction<Event, ComplexEvent>() {
+                            ...
+                        }
+                );
+            // 从结果中提取侧输出流
+     
+        DataStream<String> lateData = result.getSideOutput(lateDataOutputTag);
+```
+
+经处理匹配数据得到结果数据流之后，可以调用.getSideOutput()方法来提取侧输出流，捕获迟到数据进行额外处理。
+
+## 12.5 CEP 的状态机实现
+
+Flink CEP 中对复杂事件的检测，关键在模式的定义。 CEP 中模式的定义方式比较复杂，而且与正则表达式非常相似：正则表达式在字符串上匹配符合模板的字符序列，而Flink CEP 则是在事件流上匹配符合模式定义的复杂事件。
+
+CEP 检测处理的流程，可以认为检测匹配事件的过程中会有“初始（没有任何匹配）”“检测中（部分匹配成功）”“匹配成功”“匹配失败”等不同的“状态”。随着每个事件的到来，都会改变当前检测的“状态”；而这种改变跟当前事件的特性有关、也跟当前所处的状态有关。这样的系统，其实就是一个“状态机”（state machine）。这也正是正则表达式底层引擎的实现原理。
+
+Flink CEP 的底层工作原理其实与正则表达式是一致的，是一个“非确定有限状态自动机”（Nondeterministic Finite Automaton，NFA）。
+
+检测用户连续三次登录失败，用 Flink CEP 中的 Pattern API 可以很方便地把它定义出来；如果现在不用 CEP，而是用 DataStream API 和处理函数来实现，应该怎么做呢？这需要设置状态，并根据输入的事件不断更新状态。当然因为这个需求不是很复杂，可以用嵌套的 if-else 条件判断将它实现，不过这样做的代码可读性和扩展性都会很差。更好的方式，是实现一个状态机。
+
+![image-20221128204811148](../../images/image-20221128204811148.png)
+
+从初始状态（INITIAL）出发，遇到一个类型为fail 的登录失败事件，就开始进入部分匹配的状态；目前只有一个 fail 事件，我们把当前状态记作 S1。基于 S1 状态，如果继续遇到 fail 事件，那么就有两个 fail 事件，记作 S2。基于 S2状态如果再次遇到 fail 事件，那么就找到了一组匹配的复杂事件，把当前状态记作 Matched，就可以输出报警信息了。需要注意的是，报警完毕，需要立即重置状态回 S2；因为如果接下来再遇到 fail 事件，就又满足了新的连续三次登录失败，需要再次报警。
+
+不论是初始状态，还是 S1、S2 状态，只要遇到类型为 success 的登录成功事件，就会跳转到结束状态，记作 Terminal。此时当前检测完毕，之前的部分匹配应该全部清空，所以需要立即重置状态到 Initial，重新开始下一轮检测。所以这里我们真正参与状态转移的，其实只有 Initial、S1、S2 三个状态，Matched 和 Terminal 是为了方便做其他操作（比如输出报警、清空状态）的“临时标记状态”，不等新事件到来马上就会跳转。
+
+实现一个状态机，完整代码如下：
+
+```java
+package org.neptune.CEP;
+
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.KeyedStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.util.Collector;
+import org.neptune.pojo.LoginEvent;
+
+import java.io.Serializable;
+
+import static org.apache.flink.util.Preconditions.checkNotNull;
+
+public class NFAExample {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        // 获取登录事件流，这里与时间无关，就不生成水位线了
+        KeyedStream<LoginEvent, String> stream = env.fromElements(
+                        new LoginEvent("user_1", "192.168.0.1", "fail", 2000L),
+                        new LoginEvent("user_1", "192.168.0.2", "fail", 3000L),
+                        new LoginEvent("user_2", "192.168.1.29", "fail", 4000L),
+                        new LoginEvent("user_1", "171.56.23.10", "fail", 5000L),
+                        new LoginEvent("user_2", "192.168.1.29", "success", 6000L),
+                        new LoginEvent("user_2", "192.168.1.29", "fail", 7000L),
+                        new LoginEvent("user_2", "192.168.1.29", "fail", 8000L)
+                )
+                .keyBy(r -> r.userId);
+        // 将数据依次输入状态机进行处理
+        DataStream<String> alertStream = stream.flatMap(new StateMachineMapper());
+        alertStream.print("warning");
+        env.execute();
+    }
+
+    @SuppressWarnings("serial")
+    public static class StateMachineMapper extends RichFlatMapFunction<LoginEvent, String> {
+        // 声明当前用户对应的状态
+        private ValueState<State> currentState;
+
+        @Override
+        public void open(Configuration conf) {
+            // 获取状态对象
+            currentState = getRuntimeContext().getState(new ValueStateDescriptor<>("state", State.class));
+        }
+
+        @Override
+        public void flatMap(LoginEvent event, Collector<String> out) throws Exception {
+
+            // 获取状态，如果状态为空，置为初始状态
+            State state = currentState.value();
+            if (state == null) {
+                state = State.Initial;
+            }
+            // 基于当前状态，输入当前事件时跳转到下一状态
+            State nextState = state.transition(event.eventType);
+            if (nextState == State.Matched) {
+                // 如果检测到匹配的复杂事件，输出报警信息
+                out.collect(event.userId + " 连续三次登录失败");
+                // 需要跳转回 S2 状态，这里直接不更新状态就可以了
+            } else if (nextState == State.Terminal) {
+                // 如果到了终止状态，就重置状态，准备重新开始
+                currentState.update(State.Initial);
+            } else {
+                // 如果还没结束，更新状态（状态跳转），继续读取事件
+                currentState.update(nextState);
+            }
+        }
+    }
+
+    // 状态机实现
+    public enum State {
+        Terminal, // 匹配失败，当前匹配终止
+        Matched, // 匹配成功
+        // S2 状态
+        S2(new Transition("fail", Matched), new Transition("success", Terminal)),
+        // S1 状态
+        S1(new Transition("fail", S2), new Transition("success", Terminal)),
+        // 初始状态
+        Initial(new Transition("fail", S1), new Transition("success", Terminal));
+        private final Transition[] transitions; // 状态转移规则
+
+        // 状态的构造方法，可以传入一组状态转移规则来定义状态
+        State(Transition... transitions) {
+            this.transitions = transitions;
+        }
+
+        // 状态的转移方法，根据当前输入事件类型，从定义好的转移规则中找到下一个状态
+        public State transition(String eventType) {
+            for (Transition t : transitions) {
+                if (t.getEventType().equals(eventType)) {
+                    return t.getTargetState();
+                }
+            }
+            // 如果没有找到转移规则，说明已经结束，回到初始状态
+            return Initial;
+        }
+    }
+
+    // 定义状态转移类，包括两个属性：当前事件类型和目标状态
+    public static class Transition implements Serializable {
+        private static final long serialVersionUID = 1L;
+        // 触发状态转移的当前事件类型
+        private final String eventType;
+        // 转移的目标状态
+        private final State targetState;
+
+        public Transition(String eventType, State targetState) {
+            this.eventType = checkNotNull(eventType);
+            this.targetState = checkNotNull(targetState);
+        }
+
+        public String getEventType() {
+            return eventType;
+        }
+
+        public State getTargetState() {
+            return targetState;
+        }
+    }
+}
+```
+
+如果所有的复杂事件处理都自己设计状态机来实现是非常繁琐的，而且中间逻辑非常容易出错；所以 Flink CEP 将底层 NFA 全部实现好并封装起来，这样处理复杂事件时只要调上层的 Pattern API 就可以，大大降低了代码的复杂度，提高了编程的效率。
+
+## 12.6 本章总结
+
+Flink CEP 是 Flink 对复杂事件处理提供的强大而高效的应用库。本章详细讲解了 CEP 的核心内容——Pattern API 和模式的检测处理，并以案例说明了对超时事件和迟到数据的处理。最后进行了深度扩展，举例讲解了 CEP 的状态机实现，这部分可以只做原理了解，不要求完全实现状态机的代码。
+
+DataStream API 和处理函数是 Flink 应用的基石，而 SQL 和 CEP 就是 Flink 大厦顶层扩展的两大工具。Flink SQL 也提供了与 CEP 相结合的“模式识别”（Pattern Recognition）语句——MATCH_RECOGNIZE，可以支持在 SQL 语句中进行复杂事件处理。
