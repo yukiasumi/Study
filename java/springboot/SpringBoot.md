@@ -611,10 +611,6 @@ public class LoginInterceptor implements HandlerInterceptor {
 1. 创建Servlet类。 创建类继承HttpServlet
 2. 注册Servlet ，让框架能找到Servlet
 
-
-
-
-
  例子：
 
 1.创建自定义Servlet

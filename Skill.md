@@ -66,6 +66,10 @@ reg delete "HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}" 
 taskkill /f /im explorer.exe & start explorer.exe
 ```
 
+## DataGrip无法下载驱动
+
+设置自动代理
+
 ## UTF8
 
 一个字母字符为1字节
@@ -386,9 +390,13 @@ BEGIN
 END;
 ```
 
-
-
 ##### jdbc
+
+##### Oracle使用sys用户登录
+
+```java
+String user="sys as sysdba";
+```
 
 ###### CharacterStream方式
 
@@ -896,6 +904,21 @@ kafka.common.InconsistentClusterIdException: The Cluster ID kVSgfurUQFGGpHMTBqBP
 更改
 
 ## Linux
+
+#### 网卡失效，无法ssh连接且ping不通百度
+
+```perl
+systemctl stop NetworkManager
+systemctl disable NetworkManager
+#重启network
+systemctl start network.service
+```
+
+#### 文件大小排序
+
+```perl
+du -b * | sort -n 大小单位为b，排序，降序-nr
+```
 
 #### 配置多网卡
 
