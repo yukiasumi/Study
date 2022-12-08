@@ -1377,7 +1377,7 @@ yum repolist
 ```
 查看AXI物理卷组lsvg
 查看物理卷lspv
-查看卷组剩余空间lsvg / lsvg -i
+查看卷组剩余空间lsvg | lsvg -i
 查看具体物理卷状态lsvg -lp rootvg
 mklv -t jfs2 -y lv_oracle rootvg 30G
 crfs -v jfs2 -d lv_oracle -m / oracle -A yesmount / oracle
@@ -1388,8 +1388,6 @@ crfs -v jfs2 -d lv_arch -m /arch -A yesmount / arch
 增加磁盘空间
 chfs -a size=+2000000 / home
 ```
-
-
 
 ### ansible
 
