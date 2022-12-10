@@ -1032,8 +1032,6 @@ RESTful架构风格
 
 ​                  http://localhost:8080/myboot/students/1001/1002
 
-​                
-
    POST: 创建资源  -- sql insert
 
 ​                http://localhost:8080/myboot/student
@@ -1057,8 +1055,6 @@ RESTful架构风格
          <input type="hidden" name="_method" value="PUT" />
   </form>
    ```
-
-
 
    DELETE: 删除资源  -- sql delete
 

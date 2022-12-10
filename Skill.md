@@ -1,4 +1,43 @@
+## ElasticSearch
 
+ElasticSearch报错：
+
+```powershell
+[TOO_MANY_REQUESTS/12/index read-only / allow delete (api)]
+
+```
+
+==原因：磁盘空间不足，导致Elasticsearch触发磁盘保护，强制将所有索引设置成了只读状态。==
+
+```shell
+主要相关参数如下：
+
+cluster.routing.allocation.disk.threshold_enabled：是否启动根据磁盘空间自动分配，默认为true
+cluster.routing.allocation.disk.watermark.low：控制磁盘使用率的低水位，默认是85%，当一个节点的磁盘空间使用率超过85%，就不会给该节点分配新的shard
+cluster.routing.allocation.disk.watermark.high：控制磁盘使用率的高水位，默认是90%，当一个节点的磁盘空间使用率超过90%，就会将该节点的部分shard转移到其他节点上
+cluster.routing.allocation.disk.watermark.flood_stage：洪水水位线，默认为95%，当一个节点的磁盘空间使用率超过95%，就会把所有索引设为只读。这是最后一个保护措施，索引的只读状态必须通过人工手动解除
+cluster.info.update.interval：检查磁盘使用率的频率，默认30s
+```
+
+
+
+```powershell
+[2022-12-08T23:06:21,629][WARN ][o.e.c.r.a.DiskThresholdMonitor] [DESKTOP-UA4DJL8] flood stage disk watermark [95%] exceeded on [hOXH96qcRMeWHFMO8peCCw][DESKTOP-UA4DJL8][D:\elasticsearch-7.8.0-windows-x86_64\elasticsearch-7.8.0\data\nodes\0] free: 6.1gb[4.6%], all indices on this node will be marked read-only
+```
+
+相关参数见官方文档：[Disk-based Shard Allocation](https://www.elastic.co/guide/en/elasticsearch/reference/6.8/disk-allocator.html)。
+
+**解决： **取消节点的只读模式
+
+```perl
+###取消节点的只读模式
+PUT http://127.0.0.1:9200/_all/_settings
+Content-Type: application/json
+
+{
+  "index.blocks.read_only_allow_delete": null
+}
+```
 
 ## GitHub
 
