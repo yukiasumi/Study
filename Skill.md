@@ -1,3 +1,7 @@
+
+
+
+
 ## ElasticSearch
 
 ElasticSearch报错：
@@ -39,10 +43,22 @@ Content-Type: application/json
 }
 ```
 
+## Google域名重定向
+
+```perl
+原理：告诉Google.com不要进行区域重定向（No Country Redirection，简称NCR）。
+
+具体做法：在网址栏打入http://www.google.com/ncr，然后回车即可。如果清理了Cookies缓存，还是出现自动跳转现象，重新再在网址栏打入http://www.google.com/ncr输入，回车就行。
+```
+
+
+
 ## GitHub
 
 ```shell
 Failed to connect to github.com port 443 after 21074 ms: Timed out
+
+使用梯子配置代理
 
 git config --global -l
 http.proxy=http://127.0.0.1:1080
@@ -71,7 +87,7 @@ git config --global -l
 
 ```javascript
 //F12 控制台输入
-document.querySelector('bwp-video').playbackRate = 3
+document.querySelector('bwp-video').playbackRate = 4
 ```
 
 ## Windows
@@ -836,6 +852,9 @@ public class JDBC {
 ```perl
 启动有一个tomcat版本报错
 
+An incompatible version [1.2.14] of the Apache Tomcat Native library is installed,
+while Tomcat requires version [1.2.34]
+
 http://archive.apache.org/dist/tomcat/tomcat-connectors/native/1.2.14/binaries/
 
 下载tomcat-native-1.2.14-win32-bin.zip
@@ -943,6 +962,15 @@ kafka.common.InconsistentClusterIdException: The Cluster ID kVSgfurUQFGGpHMTBqBP
 更改
 
 ## Linux
+
+### curl返回格式化
+
+```perl
+curl 192.168.10.130:8083/connectors -s | python -m json.tool
+
+-s 不显示统计信息
+python -m json.tool 格式化json
+```
 
 #### 网卡失效，无法ssh连接且ping不通百度
 
